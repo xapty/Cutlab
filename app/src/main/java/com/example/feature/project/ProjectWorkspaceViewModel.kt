@@ -1,5 +1,6 @@
 package com.example.feature.project
 
+import android.content.Intent
 import android.net.Uri
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
@@ -13,7 +14,17 @@ import com.example.engine.audio.MultiTrackAudioMixer
 import com.example.engine.audio.PcmAudioExtractor
 import com.example.engine.audio.WaveformEnvelope
 import com.example.engine.effects.EffectsEngine
+import com.example.engine.export.CutLabExportCoordinator
+import com.example.engine.export.ExportJobState
+import com.example.engine.export.ExportOutputManager
+import com.example.engine.export.ExportPlan
+import com.example.engine.export.ExportPlanner
+import com.example.engine.export.ExportRenderPath
+import com.example.engine.export.ExportRequest
+import com.example.engine.export.ExportedArtifact
+import com.example.engine.export.HardwareExportCapabilities
 import com.example.engine.project.AspectRatioPreset
+import com.example.engine.project.ExportSettingsSpec
 import com.example.engine.project.BezierCurveSpec
 import com.example.engine.project.BlendModePreset
 import com.example.engine.project.ClipAdjustments
@@ -113,6 +124,11 @@ data class ProjectWorkspaceUiState(
     val waveformsByAssetId: Map<String, WaveformEnvelope> = emptyMap(),
     val audioMixState: MasterAudioMixState = MasterAudioMixState(),
     val isAuditioningMix: Boolean = false,
+    val preferredExportPath: ExportRenderPath = ExportRenderPath.AUTO,
+    val hardwareCapabilities: HardwareExportCapabilities = HardwareExportCapabilities(),
+    val exportPlan: ExportPlan? = null,
+    val exportJobState: ExportJobState = ExportJobState.Idle,
+    val projectExports: List<ExportedArtifact> = emptyList(),
     val isLoading: Boolean = true,
 )
 
@@ -125,6 +141,9 @@ class ProjectWorkspaceViewModel(
     private val pcmAudioExtractor: PcmAudioExtractor? = null,
     private val mixedAudioPreviewPlayer: MixedAudioPreviewPlayer? = null,
     private val audioMixer: MultiTrackAudioMixer = MultiTrackAudioMixer(animationEngine),
+    private val exportPlanner: ExportPlanner = ExportPlanner(),
+    private val exportOutputManager: ExportOutputManager? = null,
+    private val exportCoordinator: CutLabExportCoordinator? = null,
 ) : ViewModel() {
 
     private val playheadMs = MutableStateFlow(0L)
@@ -142,6 +161,10 @@ class ProjectWorkspaceViewModel(
     private val waveformsByAssetId = MutableStateFlow<Map<String, WaveformEnvelope>>(emptyMap())
     private val isAuditioningMix = MutableStateFlow(false)
     private val extractingAssetIds = Collections.synchronizedSet(mutableSetOf<String>())
+    private val preferredExportPath = MutableStateFlow(ExportRenderPath.AUTO)
+    private val projectExports = MutableStateFlow<List<ExportedArtifact>>(emptyList())
+    private val fallbackExportJobState = MutableStateFlow<ExportJobState>(ExportJobState.Idle)
+    private val hardwareCapabilitiesState = MutableStateFlow(HardwareExportCapabilities())
 
     private val draftDocument = MutableStateFlow<ProjectDocument?>(null)
     private var gestureStartDocument: ProjectDocument? = null
@@ -155,6 +178,11 @@ class ProjectWorkspaceViewModel(
     val messages = _messages.asSharedFlow()
 
     init {
+        viewModelScope.launch(Dispatchers.Default) {
+            hardwareCapabilitiesState.value = exportCoordinator?.hardwareCapabilities
+                ?: exportPlanner.probeHardwareCapabilities()
+        }
+        refreshExportHistory()
         if (pcmAudioExtractor != null) {
             viewModelScope.launch {
                 projectRepository.observeProjectAssets(projectId).collect { assets ->
@@ -231,19 +259,40 @@ class ProjectWorkspaceViewModel(
         )
     }
 
-    private val audioUiState = combine(
+    private val exportUiState = combine(
+        preferredExportPath,
+        hardwareCapabilitiesState,
+        exportCoordinator?.jobState ?: fallbackExportJobState,
+        projectExports,
+    ) { path, caps, job, history ->
+        listOf(path, caps, job, history)
+    }
+
+    @Suppress("UNCHECKED_CAST")
+    private val audioAndExportState = combine(
         waveformsByAssetId,
         isAuditioningMix,
-    ) { waveforms, auditioning -> waveforms to auditioning }
+        exportUiState,
+    ) { waveforms, auditioning, exportList ->
+        listOf(waveforms, auditioning, exportList)
+    }
 
+    @Suppress("UNCHECKED_CAST")
     val uiState: StateFlow<ProjectWorkspaceUiState> = combine(
         projectRepository.observeProject(projectId),
         projectRepository.observeProjectAssets(projectId),
         draftDocument,
         interactionState,
-        audioUiState,
-    ) { persistedDoc, assets, draft, interaction, audioPair ->
-        val (wfMap, auditioning) = audioPair
+        audioAndExportState,
+    ) { persistedDoc, assets, draft, interaction, extraList ->
+        val wfMap = extraList[0] as Map<String, WaveformEnvelope>
+        val auditioning = extraList[1] as Boolean
+        val exportItems = extraList[2] as List<Any?>
+        val prefPath = exportItems[0] as ExportRenderPath
+        val hwCaps = exportItems[1] as HardwareExportCapabilities
+        val jobState = exportItems[2] as ExportJobState
+        val exportHistory = exportItems[3] as List<ExportedArtifact>
+
         val doc = draft ?: persistedDoc
         val assetsById = assets.associateBy { it.id }
         val filteredAssets = if (interaction.mediaFilter == null) {
@@ -281,6 +330,15 @@ class ProjectWorkspaceViewModel(
         val audioMixState = doc?.let {
             audioMixer.computeLiveMeters(it, activeFrame, wfMap, assetsById)
         } ?: MasterAudioMixState()
+        val exportPlan = doc?.let {
+            exportPlanner.buildPlan(
+                document = it,
+                assetsById = assetsById,
+                settings = it.exportSettings,
+                preferredPath = prefPath,
+                capabilities = hwCaps,
+            )
+        }
 
         ProjectWorkspaceUiState(
             project = doc,
@@ -311,6 +369,11 @@ class ProjectWorkspaceViewModel(
             waveformsByAssetId = wfMap,
             audioMixState = audioMixState,
             isAuditioningMix = auditioning,
+            preferredExportPath = prefPath,
+            hardwareCapabilities = hwCaps,
+            exportPlan = exportPlan,
+            exportJobState = jobState,
+            projectExports = exportHistory,
             isLoading = false,
         )
     }.stateIn(
@@ -1280,6 +1343,96 @@ class ProjectWorkspaceViewModel(
             ?: validAtPlayhead.firstOrNull()
     }
 
+    // --- Phase 8: Export Engine Operations ---
+
+    fun refreshExportHistory() {
+        val mgr = exportOutputManager ?: return
+        viewModelScope.launch {
+            projectExports.value = mgr.listProjectExports(projectId)
+        }
+    }
+
+    fun updateExportSettings(settings: ExportSettingsSpec) {
+        viewModelScope.launch {
+            projectRepository.updateProjectExportSettings(projectId, settings)
+        }
+    }
+
+    fun setPreferredExportPath(path: ExportRenderPath) {
+        preferredExportPath.value = path
+    }
+
+    fun startExport() {
+        val doc = uiState.value.project ?: return
+        val coordinator = exportCoordinator ?: run {
+            viewModelScope.launch { _messages.emit("Export engine unavailable") }
+            return
+        }
+        pausePlayback()
+        stopPcmAudition()
+        coordinator.startExport(
+            scope = viewModelScope,
+            request = ExportRequest(
+                project = doc,
+                assetsById = uiState.value.assetsById,
+                settings = doc.exportSettings,
+                preferredPath = preferredExportPath.value,
+            ),
+            onArtifactRecorded = {
+                refreshExportHistory()
+            },
+        )
+    }
+
+    fun cancelExport() {
+        exportCoordinator?.cancelExport()
+    }
+
+    fun resetExportState() {
+        exportCoordinator?.resetState()
+    }
+
+    fun saveExportToGallery(artifact: ExportedArtifact) {
+        val mgr = exportOutputManager ?: return
+        viewModelScope.launch {
+            val uri = mgr.saveToGallery(artifact)
+            if (uri != null) {
+                refreshExportHistory()
+                _messages.emit("Saved to Movies/CutLab gallery")
+            } else {
+                _messages.emit("Unable to save video to gallery")
+            }
+        }
+    }
+
+    fun saveExportToUri(artifact: ExportedArtifact, destinationUri: Uri) {
+        val mgr = exportOutputManager ?: return
+        viewModelScope.launch {
+            val ok = mgr.writeToDestinationUri(artifact, destinationUri)
+            if (ok) {
+                refreshExportHistory()
+                _messages.emit("Saved MP4 to chosen location")
+            } else {
+                _messages.emit("Failed writing MP4 to destination")
+            }
+        }
+    }
+
+    fun createShareIntent(artifact: ExportedArtifact): Intent? {
+        return runCatching {
+            exportOutputManager?.createShareIntent(artifact)
+        }.getOrNull()
+    }
+
+    fun deleteExportArtifact(artifactId: String) {
+        val mgr = exportOutputManager ?: return
+        viewModelScope.launch {
+            mgr.deleteArtifact(artifactId)
+            refreshExportHistory()
+            _messages.emit("Removed exported file")
+        }
+    }
+
     override fun onCleared() {
         playbackJob?.cancel()
         stopPcmAudition()
@@ -1293,6 +1446,9 @@ class ProjectWorkspaceViewModel(
             preferencesRepository: CutLabPreferencesRepository,
             pcmAudioExtractor: PcmAudioExtractor? = null,
             mixedAudioPreviewPlayer: MixedAudioPreviewPlayer? = null,
+            exportPlanner: ExportPlanner = ExportPlanner(),
+            exportOutputManager: ExportOutputManager? = null,
+            exportCoordinator: CutLabExportCoordinator? = null,
         ): ViewModelProvider.Factory = object : ViewModelProvider.Factory {
             @Suppress("UNCHECKED_CAST")
             override fun <T : ViewModel> create(modelClass: Class<T>): T {
@@ -1302,6 +1458,9 @@ class ProjectWorkspaceViewModel(
                     preferencesRepository = preferencesRepository,
                     pcmAudioExtractor = pcmAudioExtractor,
                     mixedAudioPreviewPlayer = mixedAudioPreviewPlayer,
+                    exportPlanner = exportPlanner,
+                    exportOutputManager = exportOutputManager,
+                    exportCoordinator = exportCoordinator,
                 ) as T
             }
         }

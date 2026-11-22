@@ -1,6 +1,6 @@
 # CutLab Feature Status
 
-## Implemented (Phases 1 – 7)
+## Implemented (Phases 1 – 8)
 - **Platform Compatibility**: Configured for **Android 9 Pie (API 28)** minimum SDK through Android 16 (API 36).
 - **Project Management**: Create, open, rename, duplicate, switch Quick/Advanced mode without data loss, delete, search, filter by mode and aspect ratio.
 - **Persistent Schema**: Versioned `ProjectDocument` (`schemaVersion = 1`) stored in Room alongside indexed `MediaAssetEntity` rows and DataStore studio defaults.
@@ -39,7 +39,10 @@
   - **Multi-Track Synchronization & PCM Mixing**: Shared-clock 4-channel synchronized `ExoPlayer` audio playback (`StudioMediaPlayer`) plus sample-rate-converted stereo PCM mixing (`MultiTrackAudioMixer`) with keyframed volume automation, fade-in/out envelopes, soft limiting, and hardware `AudioTrack` PCM audition (`MixedAudioPreviewPlayer`).
   - **Audio FX, EQ & Stereo Pan**: Biquad Low/High Shelf EQ, Vocal Clear / Radio / Studio Punch presets, 220ms delay Echo Mix, and equal-power Stereo Panning (`AudioDsp`).
   - **Multi-Track Mixer & Beat Markers**: Live master L/R peak meters, per-track mute & peak bars, manual `+ Beat @ Playhead` markers, automatic transient beat detection, and magnetic timeline snapping to beat markers.
+- **Export Engine (Phase 8)**:
+  - **Dual-Path Hybrid Export Planner & Coordinator**: Smart planning (`ExportPlanner`) inspects hardware encoder limits (`MediaCodecList`) and active timeline composition features to dispatch sequentially compatible timelines to **Path A (`Media3TransformerExporter`)** and automatically route multi-track overlays, text layers, adjustment layers, transitions, blend modes, masks, shaders, keyframes, color grading, or mixed/DSP audio to **Path B (`CustomGlVideoExporter`)** without silently omitting edits.
+  - **Custom GL + Hardware Codec Path B**: Full offscreen EGL14 + GLES 2.0 + GLSL frame compositor (reusing `CompositorShaders`, `CompositorEngine`, `AnimationEngine`, and offscreen ARGB `TextLayerBitmapRenderer`), `EGLExt.eglPresentationTimeANDROID` surface encoding to H.264/H.265 `MediaCodec`, synchronized `MultiTrackAudioMixer` -> AAC encoding, and `MediaMuxer` container writing.
+  - **Export Options, Validation & Delivery**: Configurable `720p`/`1080p`/`1440p`/`4K`, `24`/`25`/`30`/`50`/`60 FPS`, `H.264`/`H.265`, and `128`–`320 kbps` AAC audio; live progress and cancellation; automatic `MediaExtractor` + `MediaMetadataRetriever` MP4 validation; zero-permission Save to Gallery (`MediaStore` `IS_PENDING` on API 29+ / SAF `CreateDocument` on API 28); and `FileProvider` Share Intent + per-project export history.
 
-## Planned (Phases 8+)
-- Dual-path MP4 export (`Media3 Transformer` + custom GL/MediaCodec/MediaMuxer pipeline) (Phase 8).
+## Planned (Phases 9+)
 - Advanced tools (speed ramping, LUTs, chroma key, motion tracking, proxy workflow) and release optimization (Phases 9–10).

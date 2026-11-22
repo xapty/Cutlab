@@ -8,7 +8,13 @@ import com.example.core.database.CutLabPreferencesRepository
 import com.example.core.media.MediaMetadataExtractor
 import com.example.core.storage.MediaStorageManager
 import com.example.engine.audio.MixedAudioPreviewPlayer
+import com.example.engine.audio.MultiTrackAudioMixer
 import com.example.engine.audio.PcmAudioExtractor
+import com.example.engine.export.CustomGlVideoExporter
+import com.example.engine.export.CutLabExportCoordinator
+import com.example.engine.export.ExportOutputManager
+import com.example.engine.export.ExportPlanner
+import com.example.engine.export.Media3TransformerExporter
 import com.example.engine.project.ProjectEngine
 import com.example.engine.project.ProjectRepository
 
@@ -33,6 +39,20 @@ class AppContainer(context: Context) {
             projectEngine = projectEngine,
             storageManager = storageManager,
             metadataExtractor = metadataExtractor,
+        )
+    }
+    val exportPlanner: ExportPlanner by lazy { ExportPlanner() }
+    val exportOutputManager: ExportOutputManager by lazy { ExportOutputManager(appContext) }
+    val exportCoordinator: CutLabExportCoordinator by lazy {
+        CutLabExportCoordinator(
+            exportPlanner = exportPlanner,
+            outputManager = exportOutputManager,
+            media3Exporter = Media3TransformerExporter(appContext),
+            customGlExporter = CustomGlVideoExporter(
+                context = appContext,
+                pcmAudioExtractor = pcmAudioExtractor,
+                audioMixer = MultiTrackAudioMixer(),
+            ),
         )
     }
     val imageLoader: ImageLoader by lazy {

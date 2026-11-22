@@ -406,4 +406,72 @@ class ProjectRepositoryRobolectricTest {
         assertEquals("Chorus", reopened.markers[0].label)
         assertEquals(3_250L, reopened.markers[1].timeMs)
     }
+
+    @Test
+    fun `phase 8 export settings persist and ExportOutputManager validates files and tracks artifact history`() = runTest {
+        val created = repository.createProject(
+            name = "Phase 8 Export",
+            aspectRatio = AspectRatioPreset.LANDSCAPE_16_9,
+            fps = 30,
+            editorMode = EditorMode.ADVANCED,
+        )
+        val newSettings = ExportSettingsSpec(
+            resolutionHeight = 1440,
+            fps = 60,
+            codec = "H.265",
+            audioBitrateKbps = 256,
+        )
+        repository.updateProjectExportSettings(created.id, newSettings)
+
+        val reopened = repository.observeProject(created.id).first()!!
+        assertEquals(1440, reopened.exportSettings.resolutionHeight)
+        assertEquals(60, reopened.exportSettings.fps)
+        assertEquals("H.265", reopened.exportSettings.codec)
+        assertEquals(256, reopened.exportSettings.audioBitrateKbps)
+
+        val planner = com.example.engine.export.ExportPlanner()
+        val caps = planner.probeHardwareCapabilities()
+        assertNotNull(caps)
+
+        val outputManager = com.example.engine.export.ExportOutputManager(context)
+        val targetFile = outputManager.createTargetOutputFile(created.id, created.name)
+        assertEquals(false, outputManager.validateExportedMp4(targetFile.absolutePath, expectAudio = false).isValid)
+
+        targetFile.parentFile?.mkdirs()
+        targetFile.writeBytes(ByteArray(1024) { 0x1A })
+        val invalidResult = outputManager.validateExportedMp4(targetFile.absolutePath, expectAudio = false)
+        assertEquals(false, invalidResult.isValid)
+
+        val mockPlan = com.example.engine.export.ExportPlan(
+            selectedPath = com.example.engine.export.ExportRenderPath.CUSTOM_GL_CODEC,
+            reason = "Custom GL test",
+            compatibilityNotes = emptyList(),
+            outputWidth = 2560,
+            outputHeight = 1440,
+            fps = 60,
+            codec = com.example.engine.export.ExportVideoCodec.H264,
+            videoBitrateBps = 18_000_000,
+            audioBitrateBps = 256_000,
+            hasAudio = true,
+            totalDurationMs = 5_000L,
+            estimatedFileSizeMb = 11.4f,
+            isExportable = true,
+        )
+        val mockValidation = com.example.engine.export.ExportValidationResult(
+            isValid = true,
+            fileSizeBytes = targetFile.length(),
+            durationMs = 5_000L,
+            width = 2560,
+            height = 1440,
+            hasVideoTrack = true,
+            hasAudioTrack = true,
+        )
+        val artifact = outputManager.recordArtifact(created.id, targetFile, mockPlan, mockValidation)
+        val history = outputManager.listProjectExports(created.id)
+        assertEquals(1, history.size)
+        assertEquals(artifact.id, history.first().id)
+
+        outputManager.deleteArtifact(artifact.id)
+        assertEquals(0, outputManager.listProjectExports(created.id).size)
+    }
 }

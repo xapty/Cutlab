@@ -243,6 +243,9 @@ fun CutLabApp(
                             preferencesRepository = appContainer.preferencesRepository,
                             pcmAudioExtractor = appContainer.pcmAudioExtractor,
                             mixedAudioPreviewPlayer = appContainer.mixedAudioPreviewPlayer,
+                            exportPlanner = appContainer.exportPlanner,
+                            exportOutputManager = appContainer.exportOutputManager,
+                            exportCoordinator = appContainer.exportCoordinator,
                         ),
                     )
                     ProjectWorkspaceScreen(

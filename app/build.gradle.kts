@@ -17,8 +17,8 @@ android {
     applicationId = "com.aistudio.cutlab.vdfqkm"
     minSdk = 28
     targetSdk = 36
-    versionCode = 1
-    versionName = "0.1.0"
+    versionCode = 2
+    versionName = "2.0"
 
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
   }
@@ -112,6 +112,8 @@ dependencies {
   implementation(libs.androidx.media3.exoplayer)
   implementation(libs.androidx.media3.ui)
   implementation(libs.androidx.media3.common)
+  implementation(libs.androidx.media3.transformer)
+  implementation(libs.androidx.media3.effect)
   implementation(libs.kotlinx.serialization.json)
   // implementation(libs.converter.moshi)
   // implementation(libs.firebase.ai)

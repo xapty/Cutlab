@@ -111,6 +111,19 @@ class ProjectRepository(
         projectDao.upsertProject(updated.toEntity(coverMediaUri = entity.coverMediaUri))
     }
 
+    suspend fun updateProjectExportSettings(
+        projectId: String,
+        settings: ExportSettingsSpec,
+    ) {
+        val entity = projectDao.getProjectById(projectId) ?: return
+        val currentDoc = decodeDocument(entity)
+        val updated = currentDoc.copy(
+            exportSettings = settings,
+            updatedAt = System.currentTimeMillis(),
+        )
+        projectDao.upsertProject(updated.toEntity(coverMediaUri = entity.coverMediaUri))
+    }
+
     suspend fun duplicateProject(projectId: String): ProjectDocument? {
         val entity = projectDao.getProjectById(projectId) ?: return null
         val sourceDoc = decodeDocument(entity)

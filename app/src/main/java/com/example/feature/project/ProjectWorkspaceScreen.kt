@@ -45,6 +45,7 @@ import androidx.compose.material.icons.filled.ContentCut
 import androidx.compose.material.icons.filled.CropFree
 import androidx.compose.material.icons.filled.DeleteOutline
 import androidx.compose.material.icons.filled.DeleteSweep
+import androidx.compose.material.icons.filled.FileDownload
 import androidx.compose.material.icons.filled.FolderOpen
 import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.Layers
@@ -124,6 +125,7 @@ import com.example.engine.project.TextOverlaySpec
 import com.example.engine.project.TextStylePreset
 import com.example.engine.project.TimelineClipRef
 import com.example.engine.project.TimelineTrack
+import com.example.feature.export.ExportStudioSheet
 import com.example.feature.timeline.TimelineEditorPane
 import com.example.ui.theme.LocalStudioColors
 
@@ -139,6 +141,7 @@ fun ProjectWorkspaceScreen(
     var showRenameDialog by rememberSaveable { mutableStateOf(false) }
     var showMediaSheet by rememberSaveable { mutableStateOf(false) }
     var showInspectorSheet by rememberSaveable { mutableStateOf(false) }
+    var showExportSheet by rememberSaveable { mutableStateOf(false) }
     var activeQuickTool by rememberSaveable { mutableStateOf(QuickToolSheet.NONE) }
 
     val videoPickerLauncher = rememberLauncherForActivityResult(
@@ -267,8 +270,35 @@ fun ProjectWorkspaceScreen(
                         WorkspaceModeSwitcher(
                             currentMode = project.editorMode,
                             onModeSelected = viewModel::switchEditorMode,
-                            modifier = Modifier.padding(end = 8.dp),
+                            modifier = Modifier.padding(end = 4.dp),
                         )
+                        Button(
+                            onClick = {
+                                viewModel.refreshExportHistory()
+                                showExportSheet = true
+                            },
+                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = MaterialTheme.colorScheme.primary,
+                                contentColor = MaterialTheme.colorScheme.onPrimary,
+                            ),
+                            modifier = Modifier
+                                .padding(end = 6.dp)
+                                .height(36.dp)
+                                .testTag("workspace_export_button"),
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.FileDownload,
+                                contentDescription = "Export video",
+                                modifier = Modifier.size(16.dp),
+                            )
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text(
+                                text = "Export",
+                                style = MaterialTheme.typography.labelLarge,
+                                maxLines = 1,
+                            )
+                        }
                     }
                 },
             )
@@ -759,6 +789,27 @@ fun ProjectWorkspaceScreen(
                     Text("Cancel")
                 }
             },
+        )
+    }
+
+    if (showExportSheet && project != null) {
+        ExportStudioSheet(
+            project = project,
+            plan = uiState.exportPlan,
+            hardwareCapabilities = uiState.hardwareCapabilities,
+            preferredPath = uiState.preferredExportPath,
+            jobState = uiState.exportJobState,
+            exportHistory = uiState.projectExports,
+            onUpdateSettings = viewModel::updateExportSettings,
+            onSelectRenderPath = viewModel::setPreferredExportPath,
+            onStartExport = viewModel::startExport,
+            onCancelExport = viewModel::cancelExport,
+            onResetJobState = viewModel::resetExportState,
+            onSaveToGallery = viewModel::saveExportToGallery,
+            onSaveToDestinationUri = viewModel::saveExportToUri,
+            onCreateShareIntent = viewModel::createShareIntent,
+            onDeleteArtifact = viewModel::deleteExportArtifact,
+            onDismiss = { showExportSheet = false },
         )
     }
 }
