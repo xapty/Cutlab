@@ -1,0 +1,14 @@
+# CutLab Development Roadmap
+
+| Phase | Milestone | Key Deliverables | Status |
+| :--- | :--- | :--- | :--- |
+| Phase 1 | Android Foundation | Studio branding, adaptive navigation, Room + DataStore persistence, project CRUD, Photo Picker & SAF media import, Media3 asset monitor | **Completed** |
+| Phase 2 | Editor Workspace | Portrait & landscape adaptive workspace, timeline ruler & zoom, track mute/lock/add, playhead frame-stepping, clip selection, min Android 9 (API 28) | **Completed** |
+| Phase 3 | Timeline Engine | Command-based Undo/Redo, trim, split, drag-move, duplicate, ripple delete, snapping, multi-track reordering | **Completed** |
+| Phase 4 | Quick Edit Engine | Transitions, filters, text presets, playback speed, audio volume/fades | **Completed** |
+| Phase 5 | Advanced Compositor | OpenGL ES / GLSL multi-layer compositor, blend modes, masks, adjustment layers | Planned |
+| Phase 6 | Animation Engine | Keyframes, cubic Bezier interpolation, Graph Editor, kinetic typography presets | Planned |
+| Phase 7 | Audio Engine | Waveform generation, multi-track PCM mixing, volume keyframes, beat markers | Planned |
+| Phase 8 | Export Engine | Dual-path export (Path A Media3 Transformer + Path B Custom GL/MediaCodec/MediaMuxer), progress & cancellation | Planned |
+| Phase 9 | Advanced Tools | Speed ramping, LUTs, chroma key, motion tracking, proxy workflow | Planned |
+| Phase 10 | Optimization & Release | Memory/GPU/thermal profiling, release APK verification | Planned |
