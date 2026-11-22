@@ -18,7 +18,7 @@ interface ProjectDao {
     @Query("SELECT * FROM projects WHERE id = :projectId")
     suspend fun getProjectById(projectId: String): ProjectEntity?
 
-    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    @Upsert
     suspend fun upsertProject(project: ProjectEntity)
 
     @Update
