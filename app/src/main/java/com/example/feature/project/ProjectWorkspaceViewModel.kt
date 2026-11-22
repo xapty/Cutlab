@@ -5,14 +5,31 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import com.example.core.database.CutLabPreferencesRepository
+import com.example.engine.animation.AnimationEngine
+import com.example.engine.audio.DecodedPcmBuffer
+import com.example.engine.audio.MasterAudioMixState
+import com.example.engine.audio.MixedAudioPreviewPlayer
+import com.example.engine.audio.MultiTrackAudioMixer
+import com.example.engine.audio.PcmAudioExtractor
+import com.example.engine.audio.WaveformEnvelope
 import com.example.engine.effects.EffectsEngine
 import com.example.engine.project.AspectRatioPreset
+import com.example.engine.project.BezierCurveSpec
+import com.example.engine.project.BlendModePreset
 import com.example.engine.project.ClipAdjustments
+import com.example.engine.project.ClipAudioEffect
 import com.example.engine.project.ClipKind
+import com.example.engine.project.ClipShaderEffect
 import com.example.engine.project.ClipTransition
 import com.example.engine.project.EditorMode
+import com.example.engine.project.KeyframeInterpolation
+import com.example.engine.project.KeyframeProperty
+import com.example.engine.project.LayerMask
+import com.example.engine.project.LayerTransform
 import com.example.engine.project.MediaAsset
+import com.example.engine.project.MediaStatus
 import com.example.engine.project.MediaType
+import com.example.engine.project.MotionPreset
 import com.example.engine.project.ProjectDocument
 import com.example.engine.project.ProjectRepository
 import com.example.engine.project.TextOverlaySpec
@@ -23,6 +40,7 @@ import com.example.engine.project.TrackType
 import com.example.engine.timeline.ActiveTimelineFrame
 import com.example.engine.timeline.TimelineCommandHistory
 import com.example.engine.timeline.TimelineEngine
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -35,11 +53,18 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import java.util.Collections
+import kotlin.math.abs
+import kotlin.math.max
+import kotlin.math.min
 
 enum class InspectorTab(val label: String) {
     MEDIA("Media"),
     INSPECTOR("Inspector"),
     TOOLS("FX & Text"),
+    COMPOSITOR("Compositor"),
+    ANIMATION("Animate"),
+    AUDIO("Audio"),
     CANVAS("Canvas"),
 }
 
@@ -55,6 +80,8 @@ private data class EditorInteractionState(
     val mediaFilter: MediaType? = null,
     val isImporting: Boolean = false,
     val historyVersion: Int = 0,
+    val selectedKeyframeProperty: KeyframeProperty = KeyframeProperty.SCALE_X,
+    val selectedKeyframeIds: Set<String> = emptySet(),
 )
 
 data class ProjectWorkspaceUiState(
@@ -81,6 +108,11 @@ data class ProjectWorkspaceUiState(
     val inspectorTab: InspectorTab = InspectorTab.MEDIA,
     val mediaFilter: MediaType? = null,
     val isImporting: Boolean = false,
+    val selectedKeyframeProperty: KeyframeProperty = KeyframeProperty.SCALE_X,
+    val selectedKeyframeIds: Set<String> = emptySet(),
+    val waveformsByAssetId: Map<String, WaveformEnvelope> = emptyMap(),
+    val audioMixState: MasterAudioMixState = MasterAudioMixState(),
+    val isAuditioningMix: Boolean = false,
     val isLoading: Boolean = true,
 )
 
@@ -88,7 +120,11 @@ class ProjectWorkspaceViewModel(
     private val projectId: String,
     private val projectRepository: ProjectRepository,
     private val preferencesRepository: CutLabPreferencesRepository,
-    private val timelineEngine: TimelineEngine = TimelineEngine(),
+    private val animationEngine: AnimationEngine = AnimationEngine(),
+    private val timelineEngine: TimelineEngine = TimelineEngine(animationEngine),
+    private val pcmAudioExtractor: PcmAudioExtractor? = null,
+    private val mixedAudioPreviewPlayer: MixedAudioPreviewPlayer? = null,
+    private val audioMixer: MultiTrackAudioMixer = MultiTrackAudioMixer(animationEngine),
 ) : ViewModel() {
 
     private val playheadMs = MutableStateFlow(0L)
@@ -101,6 +137,11 @@ class ProjectWorkspaceViewModel(
     private val inspectorTab = MutableStateFlow(InspectorTab.MEDIA)
     private val mediaFilter = MutableStateFlow<MediaType?>(null)
     private val isImporting = MutableStateFlow(false)
+    private val selectedKeyframeProperty = MutableStateFlow(KeyframeProperty.SCALE_X)
+    private val selectedKeyframeIds = MutableStateFlow<Set<String>>(emptySet())
+    private val waveformsByAssetId = MutableStateFlow<Map<String, WaveformEnvelope>>(emptyMap())
+    private val isAuditioningMix = MutableStateFlow(false)
+    private val extractingAssetIds = Collections.synchronizedSet(mutableSetOf<String>())
 
     private val draftDocument = MutableStateFlow<ProjectDocument?>(null)
     private var gestureStartDocument: ProjectDocument? = null
@@ -108,9 +149,37 @@ class ProjectWorkspaceViewModel(
     private val historyVersion = MutableStateFlow(0)
 
     private var playbackJob: Job? = null
+    private var auditionJob: Job? = null
 
     private val _messages = MutableSharedFlow<String>()
     val messages = _messages.asSharedFlow()
+
+    init {
+        if (pcmAudioExtractor != null) {
+            viewModelScope.launch {
+                projectRepository.observeProjectAssets(projectId).collect { assets ->
+                    assets.forEach { asset ->
+                        if (asset.type != MediaType.IMAGE &&
+                            asset.status == MediaStatus.READY &&
+                            !waveformsByAssetId.value.containsKey(asset.id) &&
+                            extractingAssetIds.add(asset.id)
+                        ) {
+                            launch {
+                                try {
+                                    val envelope = pcmAudioExtractor.extractWaveform(asset)
+                                    if (envelope != null) {
+                                        waveformsByAssetId.value = waveformsByAssetId.value + (asset.id to envelope)
+                                    }
+                                } finally {
+                                    extractingAssetIds.remove(asset.id)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     private val interactionBase = combine(
         playheadMs,
@@ -126,36 +195,55 @@ class ProjectWorkspaceViewModel(
         )
     }
 
+    private val interactionExtras = combine(
+        mediaFilter,
+        isImporting,
+        historyVersion,
+        selectedKeyframeProperty,
+        selectedKeyframeIds,
+    ) { f, imp, h, kfProp, kfIds ->
+        listOf(f, imp, h, kfProp, kfIds)
+    }
+
     private val interactionControls = combine(
         timelineZoom,
         snappingEnabled,
         activeSnapGuideMs,
         inspectorTab,
-        combine(mediaFilter, isImporting, historyVersion) { f, imp, h -> Triple(f, imp, h) },
+        interactionExtras,
     ) { zoom, snap, guide, tab, extra ->
         listOf(zoom, snap, guide, tab, extra)
     }
 
     @Suppress("UNCHECKED_CAST")
     private val interactionState = combine(interactionBase, interactionControls) { base, ctrl ->
-        val extra = ctrl[4] as Triple<MediaType?, Boolean, Int>
+        val extra = ctrl[4] as List<Any?>
         base.copy(
             timelineZoom = ctrl[0] as Float,
             snappingEnabled = ctrl[1] as Boolean,
             activeSnapGuideMs = ctrl[2] as Long?,
             inspectorTab = ctrl[3] as InspectorTab,
-            mediaFilter = extra.first,
-            isImporting = extra.second,
-            historyVersion = extra.third,
+            mediaFilter = extra[0] as MediaType?,
+            isImporting = extra[1] as Boolean,
+            historyVersion = extra[2] as Int,
+            selectedKeyframeProperty = extra[3] as KeyframeProperty,
+            selectedKeyframeIds = extra[4] as Set<String>,
         )
     }
+
+    private val audioUiState = combine(
+        waveformsByAssetId,
+        isAuditioningMix,
+    ) { waveforms, auditioning -> waveforms to auditioning }
 
     val uiState: StateFlow<ProjectWorkspaceUiState> = combine(
         projectRepository.observeProject(projectId),
         projectRepository.observeProjectAssets(projectId),
         draftDocument,
         interactionState,
-    ) { persistedDoc, assets, draft, interaction ->
+        audioUiState,
+    ) { persistedDoc, assets, draft, interaction, audioPair ->
+        val (wfMap, auditioning) = audioPair
         val doc = draft ?: persistedDoc
         val assetsById = assets.associateBy { it.id }
         val filteredAssets = if (interaction.mediaFilter == null) {
@@ -181,7 +269,18 @@ class ProjectWorkspaceViewModel(
         val selectedTrack = doc?.tracks?.firstOrNull { it.id == interaction.selectedTrackId }
             ?: primarySelectedClip?.let { clip -> doc?.tracks?.firstOrNull { it.id == clip.trackId } }
 
+        val validKeyframeIds = primarySelectedClip?.keyframeTracks
+            ?.firstOrNull { it.property == interaction.selectedKeyframeProperty }
+            ?.keyframes
+            ?.map { it.id }
+            ?.toSet()
+            ?.let { existing -> interaction.selectedKeyframeIds.intersect(existing) }
+            ?: emptySet()
+
         val canSplit = doc != null && findSplittableClip(doc, clampedPlayhead, validSelectedIds) != null
+        val audioMixState = doc?.let {
+            audioMixer.computeLiveMeters(it, activeFrame, wfMap, assetsById)
+        } ?: MasterAudioMixState()
 
         ProjectWorkspaceUiState(
             project = doc,
@@ -207,6 +306,11 @@ class ProjectWorkspaceViewModel(
             inspectorTab = interaction.inspectorTab,
             mediaFilter = interaction.mediaFilter,
             isImporting = interaction.isImporting,
+            selectedKeyframeProperty = interaction.selectedKeyframeProperty,
+            selectedKeyframeIds = validKeyframeIds,
+            waveformsByAssetId = wfMap,
+            audioMixState = audioMixState,
+            isAuditioningMix = auditioning,
             isLoading = false,
         )
     }.stateIn(
@@ -220,6 +324,7 @@ class ProjectWorkspaceViewModel(
     }
 
     fun startPlayback() {
+        stopPcmAudition()
         val total = uiState.value.totalDurationMs
         if (total <= 0L) {
             viewModelScope.launch { _messages.emit("Add media to the timeline to preview playback") }
@@ -707,14 +812,14 @@ class ProjectWorkspaceViewModel(
     fun updateSelectedClipAdjustments(adjustments: ClipAdjustments) {
         val doc = uiState.value.project ?: return
         val clip = uiState.value.selectedClip ?: return
-        if (clip.clipKind != ClipKind.MEDIA) return
+        if (clip.clipKind == ClipKind.TEXT) return
         val updated = timelineEngine.updateClipAdjustments(doc, clip.clipId, adjustments)
         commitDocumentEdit("Color & Filter", doc, updated)
     }
 
     fun previewSelectedClipAdjustments(adjustments: ClipAdjustments) {
         val clip = uiState.value.selectedClip ?: return
-        if (clip.clipKind != ClipKind.MEDIA) return
+        if (clip.clipKind == ClipKind.TEXT) return
         val base = ensureGestureBaseDocument() ?: return
         draftDocument.value = timelineEngine.updateClipAdjustments(base, clip.clipId, adjustments)
     }
@@ -722,10 +827,386 @@ class ProjectWorkspaceViewModel(
     fun applySelectedAdjustmentsToAll() {
         val doc = uiState.value.project ?: return
         val clip = uiState.value.selectedClip ?: return
-        if (clip.clipKind != ClipKind.MEDIA) return
+        if (clip.clipKind == ClipKind.TEXT) return
         val updated = timelineEngine.applyAdjustmentsToAllVisualClips(doc, clip.adjustments)
         commitDocumentEdit("Apply Filter to All", doc, updated)
         viewModelScope.launch { _messages.emit("Applied filter to all visual clips") }
+    }
+
+    // --- Phase 5: Advanced Compositor Operations ---
+
+    fun addAdjustmentClip(atPlayhead: Boolean = true) {
+        val doc = uiState.value.project ?: return
+        val startMs = if (atPlayhead) playheadMs.value else null
+        val (updated, created) = timelineEngine.insertAdjustmentClip(
+            document = doc,
+            targetTrackId = selectedTrackId.value.takeIf { id ->
+                doc.tracks.firstOrNull { it.id == id }?.type == TrackType.ADJUSTMENT
+            },
+            atTimelineMs = startMs,
+        )
+        if (created != null) {
+            selectedClipIds.value = setOf(created.clipId)
+            selectedTrackId.value = created.trackId
+            playheadMs.value = created.timelineStartMs
+            commitDocumentEdit("Add Adjustment Layer", doc, updated)
+            viewModelScope.launch { _messages.emit("Added adjustment layer clip") }
+        } else {
+            viewModelScope.launch { _messages.emit("Unlock an Adjustment track to add a layer") }
+        }
+    }
+
+    fun updateSelectedClipTransform(transform: LayerTransform) {
+        val doc = uiState.value.project ?: return
+        val clip = uiState.value.selectedClip ?: return
+        if (clip.clipKind == ClipKind.ADJUSTMENT) return
+        val updated = timelineEngine.updateClipTransform(doc, clip.clipId, transform)
+        commitDocumentEdit("Layer Transform", doc, updated)
+    }
+
+    fun previewSelectedClipTransform(transform: LayerTransform) {
+        val clip = uiState.value.selectedClip ?: return
+        if (clip.clipKind == ClipKind.ADJUSTMENT) return
+        val base = ensureGestureBaseDocument() ?: return
+        draftDocument.value = timelineEngine.updateClipTransform(base, clip.clipId, transform)
+    }
+
+    fun updateSelectedClipBlendMode(blendMode: BlendModePreset) {
+        val doc = uiState.value.project ?: return
+        val clip = uiState.value.selectedClip ?: return
+        if (clip.clipKind == ClipKind.ADJUSTMENT) return
+        val updated = timelineEngine.updateClipBlendMode(doc, clip.clipId, blendMode)
+        commitDocumentEdit("Blend Mode (${blendMode.label})", doc, updated)
+    }
+
+    fun updateSelectedClipMask(mask: LayerMask) {
+        val doc = uiState.value.project ?: return
+        val clip = uiState.value.selectedClip ?: return
+        if (clip.clipKind != ClipKind.MEDIA) return
+        val updated = timelineEngine.updateClipMask(doc, clip.clipId, mask)
+        commitDocumentEdit("Layer Mask", doc, updated)
+    }
+
+    fun previewSelectedClipMask(mask: LayerMask) {
+        val clip = uiState.value.selectedClip ?: return
+        if (clip.clipKind != ClipKind.MEDIA) return
+        val base = ensureGestureBaseDocument() ?: return
+        draftDocument.value = timelineEngine.updateClipMask(base, clip.clipId, mask)
+    }
+
+    fun updateSelectedClipShaderEffect(shaderEffect: ClipShaderEffect) {
+        val doc = uiState.value.project ?: return
+        val clip = uiState.value.selectedClip ?: return
+        if (clip.clipKind == ClipKind.TEXT) return
+        val updated = timelineEngine.updateClipShaderEffect(doc, clip.clipId, shaderEffect)
+        commitDocumentEdit("Shader FX (${shaderEffect.type.label})", doc, updated)
+    }
+
+    fun previewSelectedClipShaderEffect(shaderEffect: ClipShaderEffect) {
+        val clip = uiState.value.selectedClip ?: return
+        if (clip.clipKind == ClipKind.TEXT) return
+        val base = ensureGestureBaseDocument() ?: return
+        draftDocument.value = timelineEngine.updateClipShaderEffect(base, clip.clipId, shaderEffect)
+    }
+
+    // --- Phase 6: Animation & Keyframe Graph Editor Operations ---
+
+    fun selectKeyframeProperty(property: KeyframeProperty) {
+        selectedKeyframeProperty.value = property
+        selectedKeyframeIds.value = emptySet()
+    }
+
+    fun selectKeyframe(keyframeId: String?, multiSelect: Boolean = false) {
+        if (keyframeId == null) {
+            selectedKeyframeIds.value = emptySet()
+            return
+        }
+        selectedKeyframeIds.value = if (multiSelect) {
+            val cur = selectedKeyframeIds.value
+            if (keyframeId in cur) cur - keyframeId else cur + keyframeId
+        } else {
+            setOf(keyframeId)
+        }
+    }
+
+    fun jumpToClipRelativeTime(clipRelativeMs: Long) {
+        val clip = uiState.value.selectedClip ?: return
+        pausePlayback()
+        seekTo(clip.timelineStartMs + clipRelativeMs.coerceIn(0L, clip.durationMs))
+    }
+
+    fun toggleKeyframeAtPlayhead(property: KeyframeProperty) {
+        val doc = uiState.value.project ?: return
+        val clip = uiState.value.selectedClip ?: return
+        val clipRelMs = (playheadMs.value - clip.timelineStartMs).coerceIn(0L, clip.durationMs)
+        val existingTrack = clip.keyframeTracks.firstOrNull { it.property == property }
+        val existingNearby = existingTrack?.keyframes?.firstOrNull { abs(it.timeMs - clipRelMs) <= 40L }
+        if (existingNearby != null) {
+            val updated = timelineEngine.removeKeyframes(doc, clip.clipId, property, setOf(existingNearby.id))
+            selectedKeyframeIds.value = selectedKeyframeIds.value - existingNearby.id
+            commitDocumentEdit("Remove ${property.label} Keyframe", doc, updated)
+        } else {
+            val currentValue = animationEngine.evaluateProperty(clip, property, clipRelMs)
+            val (updated, created) = timelineEngine.upsertKeyframe(
+                document = doc,
+                clipId = clip.clipId,
+                property = property,
+                timeMs = clipRelMs,
+                value = currentValue,
+            )
+            if (created != null) {
+                selectedKeyframeIds.value = setOf(created.id)
+                commitDocumentEdit("Add ${property.label} Keyframe", doc, updated)
+            }
+        }
+    }
+
+    fun previewValueAtPlayhead(property: KeyframeProperty, newValue: Float) {
+        val clip = uiState.value.selectedClip ?: return
+        val base = ensureGestureBaseDocument() ?: return
+        val clipRelMs = (playheadMs.value - clip.timelineStartMs).coerceIn(0L, clip.durationMs)
+        val (updated, created) = timelineEngine.upsertKeyframe(
+            document = base,
+            clipId = clip.clipId,
+            property = property,
+            timeMs = clipRelMs,
+            value = newValue,
+        )
+        if (created != null) {
+            selectedKeyframeIds.value = setOf(created.id)
+        }
+        draftDocument.value = updated
+    }
+
+    fun previewMoveKeyframe(
+        property: KeyframeProperty,
+        keyframeId: String,
+        newTimeMs: Long,
+        newValue: Float,
+    ) {
+        val clip = uiState.value.selectedClip ?: return
+        val base = ensureGestureBaseDocument() ?: return
+        draftDocument.value = timelineEngine.updateKeyframeById(
+            document = base,
+            clipId = clip.clipId,
+            property = property,
+            keyframeId = keyframeId,
+            newTimeMs = newTimeMs,
+            newValue = newValue,
+        )
+    }
+
+    fun previewBezierHandle(
+        property: KeyframeProperty,
+        keyframeId: String,
+        bezier: BezierCurveSpec,
+    ) {
+        val clip = uiState.value.selectedClip ?: return
+        val base = ensureGestureBaseDocument() ?: return
+        draftDocument.value = timelineEngine.updateKeyframeById(
+            document = base,
+            clipId = clip.clipId,
+            property = property,
+            keyframeId = keyframeId,
+            interpolation = KeyframeInterpolation.CUBIC_BEZIER,
+            bezier = bezier,
+        )
+    }
+
+    fun updateSelectedKeyframesInterpolation(
+        property: KeyframeProperty,
+        interpolation: KeyframeInterpolation,
+        bezier: BezierCurveSpec? = null,
+    ) {
+        val doc = uiState.value.project ?: return
+        val clip = uiState.value.selectedClip ?: return
+        val track = clip.keyframeTracks.firstOrNull { it.property == property } ?: return
+        val targetIds = uiState.value.selectedKeyframeIds.ifEmpty {
+            track.keyframes.firstOrNull()?.let { setOf(it.id) }.orEmpty()
+        }
+        if (targetIds.isEmpty()) return
+        val updated = timelineEngine.updateMultipleKeyframesInterpolation(
+            document = doc,
+            clipId = clip.clipId,
+            property = property,
+            keyframeIds = targetIds,
+            interpolation = interpolation,
+            bezier = bezier,
+        )
+        commitDocumentEdit("Keyframe Easing (${interpolation.label})", doc, updated)
+    }
+
+    fun deleteSelectedKeyframes(property: KeyframeProperty) {
+        val doc = uiState.value.project ?: return
+        val clip = uiState.value.selectedClip ?: return
+        val ids = uiState.value.selectedKeyframeIds
+        if (ids.isEmpty()) return
+        val updated = timelineEngine.removeKeyframes(doc, clip.clipId, property, ids)
+        selectedKeyframeIds.value = emptySet()
+        commitDocumentEdit("Delete Keyframes", doc, updated)
+    }
+
+    fun clearPropertyKeyframes(property: KeyframeProperty) {
+        val doc = uiState.value.project ?: return
+        val clip = uiState.value.selectedClip ?: return
+        val updated = timelineEngine.clearKeyframeTrack(doc, clip.clipId, property)
+        selectedKeyframeIds.value = emptySet()
+        commitDocumentEdit("Clear ${property.label} Animation", doc, updated)
+    }
+
+    fun applyMotionPreset(preset: MotionPreset) {
+        val doc = uiState.value.project ?: return
+        val clip = uiState.value.selectedClip ?: return
+        val updated = timelineEngine.applyMotionPresetToClip(doc, clip.clipId, preset)
+        selectedKeyframeIds.value = emptySet()
+        commitDocumentEdit("Motion Preset (${preset.label})", doc, updated)
+        viewModelScope.launch { _messages.emit("Applied ${preset.label} animation") }
+    }
+
+    // --- Phase 7: Audio Engine Operations ---
+
+    fun updateSelectedClipAudioEffect(effect: ClipAudioEffect) {
+        val doc = uiState.value.project ?: return
+        val clip = uiState.value.selectedClip ?: return
+        val updated = timelineEngine.updateClipAudioEffect(doc, clip.clipId, effect)
+        commitDocumentEdit("Audio FX (${effect.preset.label})", doc, updated)
+    }
+
+    fun previewSelectedClipAudioEffect(effect: ClipAudioEffect) {
+        val clip = uiState.value.selectedClip ?: return
+        val base = ensureGestureBaseDocument() ?: return
+        draftDocument.value = timelineEngine.updateClipAudioEffect(base, clip.clipId, effect)
+    }
+
+    fun addBeatMarkerAtPlayhead() {
+        val doc = uiState.value.project ?: return
+        val (updated, _) = timelineEngine.addTimelineMarker(
+            document = doc,
+            timeMs = playheadMs.value,
+            label = "Beat ${doc.markers.size + 1}",
+            isBeatMarker = true,
+        )
+        if (updated != doc) {
+            commitDocumentEdit("Add Beat Marker", doc, updated)
+            viewModelScope.launch { _messages.emit("Added beat marker") }
+        }
+    }
+
+    fun detectBeatsForSelectedClip() {
+        val doc = uiState.value.project ?: return
+        val clip = uiState.value.selectedClip ?: return
+        val waveform = uiState.value.waveformsByAssetId[clip.assetId] ?: return
+        val updated = timelineEngine.addBeatMarkersFromClip(doc, clip, waveform.beatTimestampsMs)
+        if (updated != doc) {
+            commitDocumentEdit("Auto-Detect Beats", doc, updated)
+            viewModelScope.launch {
+                _messages.emit("Detected ${updated.markers.size - doc.markers.size} beat marker(s)")
+            }
+        } else {
+            viewModelScope.launch { _messages.emit("No new beats detected in selected clip range") }
+        }
+    }
+
+    fun removeTimelineMarker(markerId: String) {
+        val doc = uiState.value.project ?: return
+        val updated = timelineEngine.removeTimelineMarker(doc, markerId)
+        if (updated != doc) {
+            commitDocumentEdit("Remove Marker", doc, updated)
+        }
+    }
+
+    fun clearAllTimelineMarkers() {
+        val doc = uiState.value.project ?: return
+        val updated = timelineEngine.clearTimelineMarkers(doc)
+        if (updated != doc) {
+            commitDocumentEdit("Clear Markers", doc, updated)
+            viewModelScope.launch { _messages.emit("Cleared timeline markers") }
+        }
+    }
+
+    fun toggleAuditionPcmMix() {
+        if (isAuditioningMix.value) {
+            stopPcmAudition()
+            return
+        }
+        val doc = uiState.value.project ?: return
+        val extractor = pcmAudioExtractor
+        val player = mixedAudioPreviewPlayer
+        if (extractor == null || player == null) {
+            viewModelScope.launch { _messages.emit("Audio audition player unavailable") }
+            return
+        }
+        pausePlayback()
+        val startMs = playheadMs.value
+        val windowMs = 2_500L
+        val assetsById = uiState.value.assetsById
+        auditionJob?.cancel()
+        isAuditioningMix.value = true
+        auditionJob = viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val windowEnd = startMs + windowMs
+                val candidateClips = doc.tracks
+                    .filter { !it.isMuted && (it.type == TrackType.AUDIO || it.type == TrackType.VIDEO || it.type == TrackType.OVERLAY) }
+                    .flatMap { it.clips }
+                    .filter { clip ->
+                        clip.clipKind == ClipKind.MEDIA &&
+                            !clip.isMuted &&
+                            (clip.timelineStartMs + clip.durationMs) > startMs &&
+                            clip.timelineStartMs < windowEnd
+                    }
+
+                if (candidateClips.isEmpty()) {
+                    _messages.emit("No active unmuted audio clips at playhead")
+                    isAuditioningMix.value = false
+                    return@launch
+                }
+
+                val decodedCache = HashMap<String, DecodedPcmBuffer?>()
+                for (clip in candidateClips) {
+                    val asset = assetsById[clip.assetId] ?: continue
+                    if (asset.type == MediaType.IMAGE) continue
+                    val overlapStart = max(startMs, clip.timelineStartMs)
+                    val overlapEnd = min(windowEnd, clip.timelineStartMs + clip.durationMs)
+                    val overlapDur = overlapEnd - overlapStart
+                    if (overlapDur <= 0L) continue
+                    val relStart = overlapStart - clip.timelineStartMs
+                    val srcStart = (clip.sourceStartMs + (relStart * clip.speed).toLong()).coerceAtLeast(0L)
+                    val srcDur = (overlapDur * clip.speed).toLong().coerceAtLeast(100L)
+                    val key = "${clip.assetId}:$srcStart:$srcDur"
+                    if (!decodedCache.containsKey(key)) {
+                        decodedCache[key] = extractor.decodePcmSegment(asset, srcStart, srcDur)
+                    }
+                }
+
+                val pcm16 = audioMixer.mixWindowToPcm16(
+                    document = doc,
+                    startMs = startMs,
+                    windowDurationMs = windowMs,
+                    targetSampleRate = 44_100,
+                ) { assetId, srcStart, srcDur ->
+                    decodedCache["$assetId:$srcStart:$srcDur"]
+                }
+
+                if (pcm16.all { it == 0.toShort() }) {
+                    _messages.emit("Decoded mix window is silent")
+                    isAuditioningMix.value = false
+                    return@launch
+                }
+
+                player.playPcm16(pcm16, sampleRateHz = 44_100)
+                delay(windowMs)
+            } finally {
+                player.stop()
+                isAuditioningMix.value = false
+            }
+        }
+    }
+
+    private fun stopPcmAudition() {
+        auditionJob?.cancel()
+        auditionJob = null
+        mixedAudioPreviewPlayer?.stop()
+        isAuditioningMix.value = false
     }
 
     private fun ensureGestureBaseDocument(): ProjectDocument? {
@@ -801,6 +1282,7 @@ class ProjectWorkspaceViewModel(
 
     override fun onCleared() {
         playbackJob?.cancel()
+        stopPcmAudition()
         super.onCleared()
     }
 
@@ -809,6 +1291,8 @@ class ProjectWorkspaceViewModel(
             projectId: String,
             projectRepository: ProjectRepository,
             preferencesRepository: CutLabPreferencesRepository,
+            pcmAudioExtractor: PcmAudioExtractor? = null,
+            mixedAudioPreviewPlayer: MixedAudioPreviewPlayer? = null,
         ): ViewModelProvider.Factory = object : ViewModelProvider.Factory {
             @Suppress("UNCHECKED_CAST")
             override fun <T : ViewModel> create(modelClass: Class<T>): T {
@@ -816,6 +1300,8 @@ class ProjectWorkspaceViewModel(
                     projectId = projectId,
                     projectRepository = projectRepository,
                     preferencesRepository = preferencesRepository,
+                    pcmAudioExtractor = pcmAudioExtractor,
+                    mixedAudioPreviewPlayer = mixedAudioPreviewPlayer,
                 ) as T
             }
         }

@@ -66,6 +66,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalDensity
@@ -81,13 +82,16 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
 import com.example.core.common.TimeFormatting
+import com.example.engine.audio.WaveformEnvelope
 import com.example.engine.effects.EffectsEngine
+import com.example.engine.project.BlendModePreset
 import com.example.engine.project.ClipKind
 import com.example.engine.project.EditorMode
 import com.example.engine.project.MediaAsset
 import com.example.engine.project.MediaType
 import com.example.engine.project.ProjectDocument
 import com.example.engine.project.TimelineClipRef
+import com.example.engine.project.TimelineMarker
 import com.example.engine.project.TimelineTrack
 import com.example.engine.project.TrackType
 import com.example.engine.project.TransitionType
@@ -106,6 +110,7 @@ private val BaseDpPerSecond = 64.dp
 fun TimelineEditorPane(
     project: ProjectDocument,
     assetsById: Map<String, MediaAsset>,
+    waveformsByAssetId: Map<String, WaveformEnvelope> = emptyMap(),
     playheadMs: Long,
     totalDurationMs: Long,
     selectedClipIds: Set<String>,
@@ -333,6 +338,7 @@ fun TimelineEditorPane(
                             extentMs = timelineExtentMs,
                             pxPerMs = pxPerMs,
                             zoom = timelineZoom,
+                            markers = project.markers,
                             onSeekMs = onSeekMs,
                             modifier = Modifier
                                 .fillMaxWidth()
@@ -350,6 +356,7 @@ fun TimelineEditorPane(
                                     trackIndex = trackIndex,
                                     visibleTracks = visibleTracks,
                                     assetsById = assetsById,
+                                    waveformsByAssetId = waveformsByAssetId,
                                     pxPerMs = pxPerMs,
                                     trackLaneHeightPx = trackLaneHeightPx,
                                     selectedClipIds = selectedClipIds,
@@ -505,6 +512,7 @@ private fun TimelineRuler(
     extentMs: Long,
     pxPerMs: Float,
     zoom: Float,
+    markers: List<TimelineMarker> = emptyList(),
     onSeekMs: (Long) -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -513,6 +521,7 @@ private fun TimelineRuler(
     val labelColor = MaterialTheme.colorScheme.onSurfaceVariant
     val tickColor = studio.hairlineBorder
     val majorTickColor = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
+    val beatColor = studio.audioAmber
     val labelStyle = remember(labelColor) {
         TextStyle(
             fontFamily = JetBrainsMonoFontFamily,
@@ -572,6 +581,23 @@ private fun TimelineRuler(
             }
             t += stepMs
         }
+
+        // Beat / Cue Markers on ruler
+        markers.forEach { marker ->
+            val mx = marker.timeMs * pxPerMs
+            if (mx in 0f..size.width) {
+                val r = 4.dp.toPx()
+                val cy = size.height - r - 2f
+                val diamond = Path().apply {
+                    moveTo(mx, cy - r)
+                    lineTo(mx + r, cy)
+                    lineTo(mx, cy + r)
+                    lineTo(mx - r, cy)
+                    close()
+                }
+                drawPath(diamond, color = beatColor)
+            }
+        }
     }
 }
 
@@ -581,6 +607,7 @@ private fun TimelineTrackLane(
     trackIndex: Int,
     visibleTracks: List<TimelineTrack>,
     assetsById: Map<String, MediaAsset>,
+    waveformsByAssetId: Map<String, WaveformEnvelope>,
     pxPerMs: Float,
     trackLaneHeightPx: Float,
     selectedClipIds: Set<String>,
@@ -624,6 +651,7 @@ private fun TimelineTrackLane(
             TimelineClipBlock(
                 clip = clip,
                 asset = asset,
+                waveform = waveformsByAssetId[clip.assetId],
                 trackType = track.type,
                 trackIndex = trackIndex,
                 visibleTracks = visibleTracks,
@@ -658,6 +686,7 @@ private fun TimelineTrackLane(
 private fun TimelineClipBlock(
     clip: TimelineClipRef,
     asset: MediaAsset?,
+    waveform: WaveformEnvelope?,
     trackType: TrackType,
     trackIndex: Int,
     visibleTracks: List<TimelineTrack>,
@@ -751,8 +780,14 @@ private fun TimelineClipBlock(
                 )
             }
 
-            // Fade In / Fade Out envelope ramps
-            if (clip.fadeInMs > 0L || clip.fadeOutMs > 0L) {
+            // Fade In / Fade Out envelope ramps + Keyframe diamond markers
+            val keyframeTimestamps = remember(clip.keyframeTracks) {
+                clip.keyframeTracks
+                    .flatMap { it.keyframes }
+                    .map { it.timeMs }
+                    .distinct()
+            }
+            if (clip.fadeInMs > 0L || clip.fadeOutMs > 0L || keyframeTimestamps.isNotEmpty()) {
                 Canvas(modifier = Modifier.fillMaxSize()) {
                     val dur = clip.durationMs.coerceAtLeast(1L).toFloat()
                     if (clip.fadeInMs > 0L) {
@@ -773,6 +808,65 @@ private fun TimelineClipBlock(
                             end = Offset(size.width, size.height),
                             strokeWidth = 2f,
                         )
+                    }
+                    if (keyframeTimestamps.isNotEmpty()) {
+                        val r = 4.dp.toPx()
+                        val markerY = (size.height - r - 2.dp.toPx()).coerceAtLeast(r)
+                        keyframeTimestamps.forEach { kfTimeMs ->
+                            val kfX = ((kfTimeMs.toFloat() / dur) * size.width)
+                                .coerceIn(r, (size.width - r).coerceAtLeast(r))
+                            val diamond = Path().apply {
+                                moveTo(kfX, markerY - r)
+                                lineTo(kfX + r, markerY)
+                                lineTo(kfX, markerY + r)
+                                lineTo(kfX - r, markerY)
+                                close()
+                            }
+                            drawPath(diamond, color = studio.audioAmber)
+                        }
+                    }
+                }
+            }
+
+            // Real Sliced Waveform Bars (full height for Audio tracks, bottom mini-strip for Video tracks)
+            if (waveform != null && waveform.peaks.isNotEmpty() && clip.clipKind == ClipKind.MEDIA) {
+                val barCount = ((clip.durationMs * pxPerMs) / 5f).toInt().coerceIn(8, 120)
+                val slicedPeaks = remember(waveform, clip.sourceStartMs, clip.durationMs, clip.speed, barCount) {
+                    waveform.slicePeaks(
+                        sourceStartMs = clip.sourceStartMs,
+                        sourceSpanMs = (clip.durationMs * clip.speed).toLong().coerceAtLeast(100L),
+                        targetBars = barCount,
+                    )
+                }
+                val waveColor = if (trackType == TrackType.AUDIO) {
+                    studio.audioAmber.copy(alpha = if (clip.isMuted || isMuted) 0.2f else 0.52f)
+                } else {
+                    Color.White.copy(alpha = if (clip.isMuted || isMuted) 0.14f else 0.34f)
+                }
+                Canvas(modifier = Modifier.fillMaxSize()) {
+                    val step = size.width / slicedPeaks.size.coerceAtLeast(1)
+                    val barW = (step * 0.58f).coerceAtLeast(1.5f)
+                    val gainScale = if (clip.isMuted || isMuted) 0.25f else clip.volume.coerceIn(0.2f, 1.4f)
+                    slicedPeaks.forEachIndexed { idx, amp ->
+                        val bx = idx * step + step * 0.2f
+                        if (trackType == TrackType.AUDIO) {
+                            val h = (amp * gainScale * size.height * 0.82f).coerceIn(3f, size.height * 0.9f)
+                            val top = (size.height - h) * 0.5f
+                            drawLine(
+                                color = waveColor,
+                                start = Offset(bx, top),
+                                end = Offset(bx, top + h),
+                                strokeWidth = barW,
+                            )
+                        } else {
+                            val h = (amp * gainScale * size.height * 0.26f).coerceIn(2f, size.height * 0.32f)
+                            drawLine(
+                                color = waveColor,
+                                start = Offset(bx, size.height - 2f),
+                                end = Offset(bx, size.height - 2f - h),
+                                strokeWidth = barW,
+                            )
+                        }
                     }
                 }
             }
@@ -813,6 +907,14 @@ private fun TimelineClipBlock(
                 Column(modifier = Modifier.weight(1f)) {
                     val primaryTitle = when {
                         clip.clipKind == ClipKind.TEXT -> "T • ${clip.textSpec?.text?.ifBlank { "Text" } ?: "Text"}"
+                        clip.clipKind == ClipKind.ADJUSTMENT -> {
+                            val label = if (clip.shaderEffect.isActive && clip.adjustments.isDefault) {
+                                clip.shaderEffect.type.label
+                            } else {
+                                clip.adjustments.filterPreset.label
+                            }
+                            "ADJ • $label"
+                        }
                         else -> asset?.displayName ?: "Clip"
                     }
                     Text(
@@ -846,6 +948,38 @@ private fun TimelineClipBlock(
                                     .size(6.dp)
                                     .clip(RoundedCornerShape(3.dp))
                                     .background(Color(EffectsEngine.filterAccentColorArgb(clip.adjustments.filterPreset).toInt())),
+                            )
+                        }
+                        if (clip.blendMode != BlendModePreset.NORMAL) {
+                            Text(
+                                text = clip.blendMode.label.take(3).uppercase(),
+                                style = MaterialTheme.typography.labelSmall.copy(fontSize = 8.sp),
+                                color = MaterialTheme.colorScheme.secondary,
+                                maxLines = 1,
+                            )
+                        }
+                        if (clip.mask.isActive) {
+                            Text(
+                                text = "M",
+                                style = MaterialTheme.typography.labelSmall.copy(fontSize = 8.sp),
+                                color = studio.readyEmerald,
+                                maxLines = 1,
+                            )
+                        }
+                        if (clip.shaderEffect.isActive) {
+                            Text(
+                                text = "GL",
+                                style = MaterialTheme.typography.labelSmall.copy(fontSize = 8.sp),
+                                color = MaterialTheme.colorScheme.primary,
+                                maxLines = 1,
+                            )
+                        }
+                        if (keyframeTimestamps.isNotEmpty()) {
+                            Text(
+                                text = "KF",
+                                style = MaterialTheme.typography.labelSmall.copy(fontSize = 8.sp),
+                                color = studio.audioAmber,
+                                maxLines = 1,
                             )
                         }
                     }

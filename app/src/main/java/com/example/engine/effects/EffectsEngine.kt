@@ -82,15 +82,33 @@ object EffectsEngine {
             saturation = (base.saturation * user.saturation).coerceIn(0f, 2.2f),
             exposure = (base.exposure + user.exposure).coerceIn(-1f, 1f),
             temperature = (base.temperature + user.temperature).coerceIn(-1f, 1f),
+            tint = (base.tint + user.tint).coerceIn(-1f, 1f),
             vignette = (base.vignette + user.vignette).coerceIn(0f, 1f),
             blurRadius = (base.blurRadius + user.blurRadius).coerceIn(0f, 24f),
             sharpen = (base.sharpen + user.sharpen).coerceIn(0f, 1f),
         )
     }
 
+    fun mergeAdjustments(base: ClipAdjustments, adjustmentLayer: ClipAdjustments): ClipAdjustments {
+        val b = resolveEffectiveAdjustments(base)
+        val a = resolveEffectiveAdjustments(adjustmentLayer)
+        return ClipAdjustments(
+            filterPreset = if (a.filterPreset != FilterPreset.NONE) a.filterPreset else b.filterPreset,
+            brightness = (b.brightness + a.brightness).coerceIn(-1f, 1f),
+            contrast = (b.contrast * a.contrast).coerceIn(0.4f, 2.4f),
+            saturation = (b.saturation * a.saturation).coerceIn(0f, 2.4f),
+            exposure = (b.exposure + a.exposure).coerceIn(-1f, 1f),
+            temperature = (b.temperature + a.temperature).coerceIn(-1f, 1f),
+            tint = (b.tint + a.tint).coerceIn(-1f, 1f),
+            vignette = (b.vignette + a.vignette).coerceIn(0f, 1f),
+            blurRadius = (b.blurRadius + a.blurRadius).coerceIn(0f, 24f),
+            sharpen = (b.sharpen + a.sharpen).coerceIn(0f, 1f),
+        )
+    }
+
     /**
      * Produces a 20-float 4x5 RGBA color matrix combining saturation, contrast,
-     * brightness, exposure, and temperature warm/cool channel offsets.
+     * brightness, exposure, temperature, and green-magenta tint channel offsets.
      */
     fun buildColorMatrixValues(effective: ClipAdjustments): FloatArray {
         val sat = effective.saturation.coerceIn(0f, 2.5f)
@@ -109,8 +127,10 @@ object EffectsEngine {
         val brightTranslate = effective.brightness.coerceIn(-1f, 1f) * 140f
 
         val temp = effective.temperature.coerceIn(-1f, 1f)
-        val warmRedShift = temp * 28f
-        val coolBlueShift = -temp * 28f
+        val tint = effective.tint.coerceIn(-1f, 1f)
+        val warmRedShift = temp * 28f + tint * 12f
+        val tintGreenShift = -tint * 24f
+        val coolBlueShift = -temp * 28f + tint * 12f
 
         val m00 = (sr + sat) * c
         val m01 = sg * c
@@ -126,7 +146,7 @@ object EffectsEngine {
 
         return floatArrayOf(
             m00, m01, m02, 0f, contrastTranslate + brightTranslate + warmRedShift,
-            m10, m11, m12, 0f, contrastTranslate + brightTranslate,
+            m10, m11, m12, 0f, contrastTranslate + brightTranslate + tintGreenShift,
             m20, m21, m22, 0f, contrastTranslate + brightTranslate + coolBlueShift,
             0f, 0f, 0f, 1f, 0f,
         )

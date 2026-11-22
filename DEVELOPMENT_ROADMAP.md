@@ -6,9 +6,9 @@
 | Phase 2 | Editor Workspace | Portrait & landscape adaptive workspace, timeline ruler & zoom, track mute/lock/add, playhead frame-stepping, clip selection, min Android 9 (API 28) | **Completed** |
 | Phase 3 | Timeline Engine | Command-based Undo/Redo, trim, split, drag-move, duplicate, ripple delete, snapping, multi-track reordering | **Completed** |
 | Phase 4 | Quick Edit Engine | Transitions, filters, text presets, playback speed, audio volume/fades | **Completed** |
-| Phase 5 | Advanced Compositor | OpenGL ES / GLSL multi-layer compositor, blend modes, masks, adjustment layers | Planned |
-| Phase 6 | Animation Engine | Keyframes, cubic Bezier interpolation, Graph Editor, kinetic typography presets | Planned |
-| Phase 7 | Audio Engine | Waveform generation, multi-track PCM mixing, volume keyframes, beat markers | Planned |
+| Phase 5 | Advanced Compositor | OpenGL ES / GLSL multi-layer compositor, blend modes, masks, adjustment layers | **Completed** |
+| Phase 6 | Animation Engine | Keyframes, cubic Bezier interpolation, Graph Editor, motion graphics presets | **Completed** |
+| Phase 7 | Audio Engine | Waveform generation & caching, multi-track PCM mixing, volume keyframes, EQ/Echo/Pan DSP, beat markers & sync | **Completed** |
 | Phase 8 | Export Engine | Dual-path export (Path A Media3 Transformer + Path B Custom GL/MediaCodec/MediaMuxer), progress & cancellation | Planned |
 | Phase 9 | Advanced Tools | Speed ramping, LUTs, chroma key, motion tracking, proxy workflow | Planned |
 | Phase 10 | Optimization & Release | Memory/GPU/thermal profiling, release APK verification | Planned |

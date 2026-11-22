@@ -79,6 +79,10 @@ enum class QuickToolSheet {
     SPEED,
     AUDIO,
     RATIO,
+    TRANSFORM,
+    BLEND_MASK,
+    SHADER_FX,
+    ANIMATION,
 }
 
 @Composable
@@ -109,7 +113,10 @@ fun QuickToolsOverviewContent(
             onCommitSliderEdit = onCommitSliderEdit,
         )
 
-        if (selectedClip != null && selectedClip.clipKind == ClipKind.MEDIA && selectedAsset?.type != MediaType.AUDIO) {
+        if (selectedClip != null &&
+            (selectedClip.clipKind == ClipKind.ADJUSTMENT ||
+                (selectedClip.clipKind == ClipKind.MEDIA && selectedAsset?.type != MediaType.AUDIO))
+        ) {
             FilterToolPanel(
                 clip = selectedClip,
                 onUpdateAdjustments = onUpdateAdjustments,
@@ -117,6 +124,8 @@ fun QuickToolsOverviewContent(
                 onCommitSliderEdit = onCommitSliderEdit,
                 onApplyFilterToAll = onApplyFilterToAll,
             )
+        }
+        if (selectedClip != null && selectedClip.clipKind == ClipKind.MEDIA && selectedAsset?.type != MediaType.AUDIO) {
             TransitionToolPanel(
                 clip = selectedClip,
                 onUpdateTransition = onUpdateTransition,
@@ -363,11 +372,11 @@ fun FilterToolPanel(
     onCommitSliderEdit: (String) -> Unit,
     onApplyFilterToAll: () -> Unit,
 ) {
-    if (clip == null || clip.clipKind != ClipKind.MEDIA) {
+    if (clip == null || clip.clipKind == ClipKind.TEXT) {
         EmptyStudioState(
             icon = Icons.Default.AutoFixHigh,
-            title = "Select a Video or Photo Clip",
-            subtitle = "Tap a visual clip on the timeline to apply color filters and adjustments.",
+            title = "Select a Visual or Adjustment Clip",
+            subtitle = "Tap a video, photo, or adjustment clip on the timeline to apply color filters.",
         )
         return
     }

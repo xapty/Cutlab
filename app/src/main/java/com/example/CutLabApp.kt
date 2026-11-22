@@ -241,6 +241,8 @@ fun CutLabApp(
                             projectId = route.projectId,
                             projectRepository = appContainer.projectRepository,
                             preferencesRepository = appContainer.preferencesRepository,
+                            pcmAudioExtractor = appContainer.pcmAudioExtractor,
+                            mixedAudioPreviewPlayer = appContainer.mixedAudioPreviewPlayer,
                         ),
                     )
                     ProjectWorkspaceScreen(

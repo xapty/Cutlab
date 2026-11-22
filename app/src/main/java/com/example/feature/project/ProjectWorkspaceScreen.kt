@@ -33,18 +33,23 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.Redo
 import androidx.compose.material.icons.automirrored.filled.Undo
 import androidx.compose.material.icons.automirrored.filled.VolumeUp
+import androidx.compose.material.icons.filled.Animation
 import androidx.compose.material.icons.filled.AspectRatio
 import androidx.compose.material.icons.filled.AudioFile
 import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.AutoFixHigh
+import androidx.compose.material.icons.filled.BlurOn
 import androidx.compose.material.icons.filled.Bolt
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.ContentCut
+import androidx.compose.material.icons.filled.CropFree
 import androidx.compose.material.icons.filled.DeleteOutline
 import androidx.compose.material.icons.filled.DeleteSweep
 import androidx.compose.material.icons.filled.FolderOpen
 import androidx.compose.material.icons.filled.Image
+import androidx.compose.material.icons.filled.Layers
 import androidx.compose.material.icons.filled.Movie
+import androidx.compose.material.icons.filled.OpenWith
 import androidx.compose.material.icons.filled.PermMedia
 import androidx.compose.material.icons.filled.Speed
 import androidx.compose.material.icons.filled.TextFields
@@ -62,11 +67,11 @@ import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.ScrollableTabRow
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Tab
-import androidx.compose.material3.TabRow
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
@@ -97,13 +102,23 @@ import com.example.core.designsystem.MediaTypeBadge
 import com.example.core.designsystem.StudioBadge
 import com.example.core.designsystem.StudioPanel
 import com.example.engine.project.AspectRatioPreset
+import com.example.engine.project.BezierCurveSpec
+import com.example.engine.project.BlendModePreset
 import com.example.engine.project.ClipAdjustments
+import com.example.engine.project.ClipAudioEffect
+import com.example.engine.project.ClipKind
+import com.example.engine.project.ClipShaderEffect
 import com.example.engine.project.ClipTransition
 import com.example.engine.project.EditorMode
 import com.example.engine.project.FrameRateOption
+import com.example.engine.project.KeyframeInterpolation
+import com.example.engine.project.KeyframeProperty
+import com.example.engine.project.LayerMask
+import com.example.engine.project.LayerTransform
 import com.example.engine.project.MediaAsset
 import com.example.engine.project.MediaStatus
 import com.example.engine.project.MediaType
+import com.example.engine.project.MotionPreset
 import com.example.engine.project.ProjectDocument
 import com.example.engine.project.TextOverlaySpec
 import com.example.engine.project.TextStylePreset
@@ -365,6 +380,33 @@ fun ProjectWorkspaceScreen(
                                 onUpdateSpeed = viewModel::updateSelectedClipSpeed,
                                 onUpdateAudio = viewModel::updateSelectedClipAudio,
                                 onPreviewAudio = viewModel::previewSelectedClipAudio,
+                                onUpdateAudioEffect = viewModel::updateSelectedClipAudioEffect,
+                                onPreviewAudioEffect = viewModel::previewSelectedClipAudioEffect,
+                                onAddMarkerAtPlayhead = viewModel::addBeatMarkerAtPlayhead,
+                                onDetectBeatsForClip = viewModel::detectBeatsForSelectedClip,
+                                onRemoveMarker = viewModel::removeTimelineMarker,
+                                onClearMarkers = viewModel::clearAllTimelineMarkers,
+                                onJumpToTime = viewModel::seekTo,
+                                onAuditionPcmMix = viewModel::toggleAuditionPcmMix,
+                                onAddAdjustmentClip = { viewModel.addAdjustmentClip(atPlayhead = true) },
+                                onUpdateTransform = viewModel::updateSelectedClipTransform,
+                                onPreviewTransform = viewModel::previewSelectedClipTransform,
+                                onUpdateBlendMode = viewModel::updateSelectedClipBlendMode,
+                                onUpdateMask = viewModel::updateSelectedClipMask,
+                                onPreviewMask = viewModel::previewSelectedClipMask,
+                                onUpdateShaderEffect = viewModel::updateSelectedClipShaderEffect,
+                                onPreviewShaderEffect = viewModel::previewSelectedClipShaderEffect,
+                                onSelectKeyframeProperty = viewModel::selectKeyframeProperty,
+                                onSelectKeyframe = viewModel::selectKeyframe,
+                                onJumpToClipRelativeTime = viewModel::jumpToClipRelativeTime,
+                                onToggleKeyframeAtPlayhead = viewModel::toggleKeyframeAtPlayhead,
+                                onPreviewValueAtPlayhead = viewModel::previewValueAtPlayhead,
+                                onPreviewMoveKeyframe = viewModel::previewMoveKeyframe,
+                                onPreviewBezierHandle = viewModel::previewBezierHandle,
+                                onUpdateKeyframesInterpolation = viewModel::updateSelectedKeyframesInterpolation,
+                                onDeleteSelectedKeyframes = viewModel::deleteSelectedKeyframes,
+                                onClearPropertyKeyframes = viewModel::clearPropertyKeyframes,
+                                onApplyMotionPreset = viewModel::applyMotionPreset,
                                 onCommitSliderEdit = viewModel::commitClipGesture,
                                 modifier = Modifier
                                     .weight(0.44f)
@@ -375,6 +417,7 @@ fun ProjectWorkspaceScreen(
                         TimelineEditorPane(
                             project = project,
                             assetsById = uiState.assetsById,
+                            waveformsByAssetId = uiState.waveformsByAssetId,
                             playheadMs = uiState.playheadMs,
                             totalDurationMs = uiState.totalDurationMs,
                             selectedClipIds = uiState.selectedClipIds,
@@ -425,6 +468,7 @@ fun ProjectWorkspaceScreen(
                         TimelineEditorPane(
                             project = project,
                             assetsById = uiState.assetsById,
+                            waveformsByAssetId = uiState.waveformsByAssetId,
                             playheadMs = uiState.playheadMs,
                             totalDurationMs = uiState.totalDurationMs,
                             selectedClipIds = uiState.selectedClipIds,
@@ -460,6 +504,7 @@ fun ProjectWorkspaceScreen(
                             onOpenMediaSheet = { showMediaSheet = true },
                             onOpenInspectorSheet = { showInspectorSheet = true },
                             onOpenQuickTool = { activeQuickTool = it },
+                            onAddAdjustmentClip = { viewModel.addAdjustmentClip(atPlayhead = true) },
                             onSplitAtPlayhead = viewModel::splitAtPlayhead,
                             onDuplicateClip = viewModel::duplicateSelectedClip,
                             onRippleDeleteClip = viewModel::rippleDeleteSelectedClip,
@@ -615,15 +660,68 @@ fun ProjectWorkspaceScreen(
                         clip = uiState.selectedClip,
                         onUpdateSpeed = viewModel::updateSelectedClipSpeed,
                     )
-                    QuickToolSheet.AUDIO -> AudioToolPanel(
+                    QuickToolSheet.AUDIO -> AudioWorkspaceContent(
+                        project = project,
                         clip = uiState.selectedClip,
+                        asset = uiState.selectedClipAsset,
+                        waveform = uiState.selectedClip?.let { uiState.waveformsByAssetId[it.assetId] },
+                        mixState = uiState.audioMixState,
+                        playheadMs = uiState.playheadMs,
+                        isAuditioningMix = uiState.isAuditioningMix,
+                        onToggleTrackMute = viewModel::toggleTrackMute,
                         onUpdateAudio = viewModel::updateSelectedClipAudio,
                         onPreviewAudio = viewModel::previewSelectedClipAudio,
-                        onCommitSliderEdit = viewModel::commitClipGesture,
+                        onUpdateAudioEffect = viewModel::updateSelectedClipAudioEffect,
+                        onPreviewAudioEffect = viewModel::previewSelectedClipAudioEffect,
+                        onAddMarkerAtPlayhead = viewModel::addBeatMarkerAtPlayhead,
+                        onDetectBeatsForClip = viewModel::detectBeatsForSelectedClip,
+                        onRemoveMarker = viewModel::removeTimelineMarker,
+                        onClearMarkers = viewModel::clearAllTimelineMarkers,
+                        onJumpToTime = viewModel::seekTo,
+                        onAuditionPcmMix = viewModel::toggleAuditionPcmMix,
+                        onCommitGesture = viewModel::commitClipGesture,
                     )
                     QuickToolSheet.RATIO -> RatioToolPanel(
                         project = project,
                         onUpdateCanvas = viewModel::updateCanvasSpecs,
+                    )
+                    QuickToolSheet.TRANSFORM -> TransformToolPanel(
+                        clip = uiState.selectedClip,
+                        onUpdateTransform = viewModel::updateSelectedClipTransform,
+                        onPreviewTransform = viewModel::previewSelectedClipTransform,
+                        onCommitSliderEdit = viewModel::commitClipGesture,
+                    )
+                    QuickToolSheet.BLEND_MASK -> BlendAndMaskToolPanel(
+                        clip = uiState.selectedClip,
+                        onUpdateBlendMode = viewModel::updateSelectedClipBlendMode,
+                        onUpdateMask = viewModel::updateSelectedClipMask,
+                        onPreviewMask = viewModel::previewSelectedClipMask,
+                        onCommitSliderEdit = viewModel::commitClipGesture,
+                    )
+                    QuickToolSheet.SHADER_FX -> ShaderToolPanel(
+                        clip = uiState.selectedClip,
+                        onUpdateShaderEffect = viewModel::updateSelectedClipShaderEffect,
+                        onPreviewShaderEffect = viewModel::previewSelectedClipShaderEffect,
+                        onCommitSliderEdit = viewModel::commitClipGesture,
+                    )
+                    QuickToolSheet.ANIMATION -> AnimationOverviewContent(
+                        clip = uiState.selectedClip,
+                        asset = uiState.selectedClipAsset,
+                        playheadMs = uiState.playheadMs,
+                        selectedProperty = uiState.selectedKeyframeProperty,
+                        selectedKeyframeIds = uiState.selectedKeyframeIds,
+                        onSelectProperty = viewModel::selectKeyframeProperty,
+                        onSelectKeyframe = viewModel::selectKeyframe,
+                        onJumpToClipRelativeTime = viewModel::jumpToClipRelativeTime,
+                        onToggleKeyframeAtPlayhead = viewModel::toggleKeyframeAtPlayhead,
+                        onPreviewValueAtPlayhead = viewModel::previewValueAtPlayhead,
+                        onPreviewMoveKeyframe = viewModel::previewMoveKeyframe,
+                        onPreviewBezierHandle = viewModel::previewBezierHandle,
+                        onUpdateKeyframesInterpolation = viewModel::updateSelectedKeyframesInterpolation,
+                        onDeleteSelectedKeyframes = viewModel::deleteSelectedKeyframes,
+                        onClearPropertyKeyframes = viewModel::clearPropertyKeyframes,
+                        onApplyMotionPreset = viewModel::applyMotionPreset,
+                        onCommitGesture = viewModel::commitClipGesture,
                     )
                     QuickToolSheet.NONE -> Unit
                 }
@@ -700,6 +798,33 @@ private fun SideInspectorPanel(
     onUpdateSpeed: (Float) -> Unit,
     onUpdateAudio: (Float, Boolean, Long, Long) -> Unit,
     onPreviewAudio: (Float, Boolean, Long, Long) -> Unit,
+    onUpdateAudioEffect: (ClipAudioEffect) -> Unit,
+    onPreviewAudioEffect: (ClipAudioEffect) -> Unit,
+    onAddMarkerAtPlayhead: () -> Unit,
+    onDetectBeatsForClip: () -> Unit,
+    onRemoveMarker: (String) -> Unit,
+    onClearMarkers: () -> Unit,
+    onJumpToTime: (Long) -> Unit,
+    onAuditionPcmMix: () -> Unit,
+    onAddAdjustmentClip: () -> Unit,
+    onUpdateTransform: (LayerTransform) -> Unit,
+    onPreviewTransform: (LayerTransform) -> Unit,
+    onUpdateBlendMode: (BlendModePreset) -> Unit,
+    onUpdateMask: (LayerMask) -> Unit,
+    onPreviewMask: (LayerMask) -> Unit,
+    onUpdateShaderEffect: (ClipShaderEffect) -> Unit,
+    onPreviewShaderEffect: (ClipShaderEffect) -> Unit,
+    onSelectKeyframeProperty: (KeyframeProperty) -> Unit,
+    onSelectKeyframe: (String?, Boolean) -> Unit,
+    onJumpToClipRelativeTime: (Long) -> Unit,
+    onToggleKeyframeAtPlayhead: (KeyframeProperty) -> Unit,
+    onPreviewValueAtPlayhead: (KeyframeProperty, Float) -> Unit,
+    onPreviewMoveKeyframe: (KeyframeProperty, String, Long, Float) -> Unit,
+    onPreviewBezierHandle: (KeyframeProperty, String, BezierCurveSpec) -> Unit,
+    onUpdateKeyframesInterpolation: (KeyframeProperty, KeyframeInterpolation, BezierCurveSpec?) -> Unit,
+    onDeleteSelectedKeyframes: (KeyframeProperty) -> Unit,
+    onClearPropertyKeyframes: (KeyframeProperty) -> Unit,
+    onApplyMotionPreset: (MotionPreset) -> Unit,
     onCommitSliderEdit: (String) -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -711,8 +836,9 @@ private fun SideInspectorPanel(
         border = BorderStroke(1.dp, studio.hairlineBorder),
     ) {
         Column(modifier = Modifier.fillMaxSize()) {
-            TabRow(
+            ScrollableTabRow(
                 selectedTabIndex = uiState.inspectorTab.ordinal,
+                edgePadding = 8.dp,
                 containerColor = studio.elevatedPanel,
                 contentColor = MaterialTheme.colorScheme.primary,
             ) {
@@ -836,6 +962,95 @@ private fun SideInspectorPanel(
                     }
                 }
 
+                InspectorTab.COMPOSITOR -> {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .verticalScroll(rememberScrollState())
+                            .padding(12.dp),
+                        verticalArrangement = Arrangement.spacedBy(10.dp),
+                    ) {
+                        CompositorOverviewContent(
+                            selectedClip = uiState.selectedClip,
+                            selectedAsset = uiState.selectedClipAsset,
+                            onAddAdjustmentClip = onAddAdjustmentClip,
+                            onUpdateTransform = onUpdateTransform,
+                            onPreviewTransform = onPreviewTransform,
+                            onUpdateBlendMode = onUpdateBlendMode,
+                            onUpdateMask = onUpdateMask,
+                            onPreviewMask = onPreviewMask,
+                            onUpdateShaderEffect = onUpdateShaderEffect,
+                            onPreviewShaderEffect = onPreviewShaderEffect,
+                            onUpdateAdjustments = onUpdateAdjustments,
+                            onPreviewAdjustments = onPreviewAdjustments,
+                            onApplyFilterToAll = onApplyFilterToAll,
+                            onCommitSliderEdit = onCommitSliderEdit,
+                        )
+                    }
+                }
+
+                InspectorTab.ANIMATION -> {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .verticalScroll(rememberScrollState())
+                            .padding(12.dp),
+                        verticalArrangement = Arrangement.spacedBy(10.dp),
+                    ) {
+                        AnimationOverviewContent(
+                            clip = uiState.selectedClip,
+                            asset = uiState.selectedClipAsset,
+                            playheadMs = uiState.playheadMs,
+                            selectedProperty = uiState.selectedKeyframeProperty,
+                            selectedKeyframeIds = uiState.selectedKeyframeIds,
+                            onSelectProperty = onSelectKeyframeProperty,
+                            onSelectKeyframe = onSelectKeyframe,
+                            onJumpToClipRelativeTime = onJumpToClipRelativeTime,
+                            onToggleKeyframeAtPlayhead = onToggleKeyframeAtPlayhead,
+                            onPreviewValueAtPlayhead = onPreviewValueAtPlayhead,
+                            onPreviewMoveKeyframe = onPreviewMoveKeyframe,
+                            onPreviewBezierHandle = onPreviewBezierHandle,
+                            onUpdateKeyframesInterpolation = onUpdateKeyframesInterpolation,
+                            onDeleteSelectedKeyframes = onDeleteSelectedKeyframes,
+                            onClearPropertyKeyframes = onClearPropertyKeyframes,
+                            onApplyMotionPreset = onApplyMotionPreset,
+                            onCommitGesture = onCommitSliderEdit,
+                        )
+                    }
+                }
+
+                InspectorTab.AUDIO -> {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .verticalScroll(rememberScrollState())
+                            .padding(12.dp),
+                        verticalArrangement = Arrangement.spacedBy(10.dp),
+                    ) {
+                        AudioWorkspaceContent(
+                            project = project,
+                            clip = uiState.selectedClip,
+                            asset = uiState.selectedClipAsset,
+                            waveform = uiState.selectedClip?.let { uiState.waveformsByAssetId[it.assetId] },
+                            mixState = uiState.audioMixState,
+                            playheadMs = uiState.playheadMs,
+                            isAuditioningMix = uiState.isAuditioningMix,
+                            onToggleTrackMute = onToggleTrackMute,
+                            onUpdateAudio = onUpdateAudio,
+                            onPreviewAudio = onPreviewAudio,
+                            onUpdateAudioEffect = onUpdateAudioEffect,
+                            onPreviewAudioEffect = onPreviewAudioEffect,
+                            onAddMarkerAtPlayhead = onAddMarkerAtPlayhead,
+                            onDetectBeatsForClip = onDetectBeatsForClip,
+                            onRemoveMarker = onRemoveMarker,
+                            onClearMarkers = onClearMarkers,
+                            onJumpToTime = onJumpToTime,
+                            onAuditionPcmMix = onAuditionPcmMix,
+                            onCommitGesture = onCommitSliderEdit,
+                        )
+                    }
+                }
+
                 InspectorTab.CANVAS -> {
                     Column(
                         modifier = Modifier
@@ -864,6 +1079,7 @@ private fun PortraitBottomToolbar(
     onOpenMediaSheet: () -> Unit,
     onOpenInspectorSheet: () -> Unit,
     onOpenQuickTool: (QuickToolSheet) -> Unit,
+    onAddAdjustmentClip: () -> Unit,
     onSplitAtPlayhead: () -> Unit,
     onDuplicateClip: () -> Unit,
     onRippleDeleteClip: () -> Unit,
@@ -1013,7 +1229,6 @@ private fun PortraitBottomToolbar(
 
             OutlinedButton(
                 onClick = { onOpenQuickTool(QuickToolSheet.AUDIO) },
-                enabled = selectedClip != null,
                 modifier = Modifier
                     .minimumInteractiveComponentSize()
                     .testTag("toolbar_audio_button"),
@@ -1021,6 +1236,65 @@ private fun PortraitBottomToolbar(
                 Icon(Icons.AutoMirrored.Filled.VolumeUp, contentDescription = null, modifier = Modifier.size(16.dp))
                 Spacer(Modifier.width(4.dp))
                 Text("Audio")
+            }
+
+            OutlinedButton(
+                onClick = { onOpenQuickTool(QuickToolSheet.TRANSFORM) },
+                enabled = selectedClip != null && selectedClip.clipKind != ClipKind.ADJUSTMENT,
+                modifier = Modifier
+                    .minimumInteractiveComponentSize()
+                    .testTag("toolbar_transform_button"),
+            ) {
+                Icon(Icons.Default.OpenWith, contentDescription = null, modifier = Modifier.size(16.dp))
+                Spacer(Modifier.width(4.dp))
+                Text("Transform")
+            }
+
+            OutlinedButton(
+                onClick = { onOpenQuickTool(QuickToolSheet.BLEND_MASK) },
+                enabled = selectedClip != null && selectedClip.clipKind != ClipKind.ADJUSTMENT,
+                modifier = Modifier
+                    .minimumInteractiveComponentSize()
+                    .testTag("toolbar_blend_mask_button"),
+            ) {
+                Icon(Icons.Default.CropFree, contentDescription = null, modifier = Modifier.size(16.dp))
+                Spacer(Modifier.width(4.dp))
+                Text("Blend/Mask")
+            }
+
+            OutlinedButton(
+                onClick = { onOpenQuickTool(QuickToolSheet.SHADER_FX) },
+                enabled = selectedClip != null && selectedClip.clipKind != ClipKind.TEXT,
+                modifier = Modifier
+                    .minimumInteractiveComponentSize()
+                    .testTag("toolbar_shader_button"),
+            ) {
+                Icon(Icons.Default.BlurOn, contentDescription = null, modifier = Modifier.size(16.dp))
+                Spacer(Modifier.width(4.dp))
+                Text("Shader")
+            }
+
+            OutlinedButton(
+                onClick = { onOpenQuickTool(QuickToolSheet.ANIMATION) },
+                enabled = selectedClip != null,
+                modifier = Modifier
+                    .minimumInteractiveComponentSize()
+                    .testTag("toolbar_animate_button"),
+            ) {
+                Icon(Icons.Default.Animation, contentDescription = null, modifier = Modifier.size(16.dp))
+                Spacer(Modifier.width(4.dp))
+                Text("Animate")
+            }
+
+            OutlinedButton(
+                onClick = onAddAdjustmentClip,
+                modifier = Modifier
+                    .minimumInteractiveComponentSize()
+                    .testTag("toolbar_add_adjustment_button"),
+            ) {
+                Icon(Icons.Default.Layers, contentDescription = null, modifier = Modifier.size(16.dp))
+                Spacer(Modifier.width(4.dp))
+                Text("+ Adj")
             }
 
             OutlinedButton(
@@ -1085,7 +1359,11 @@ private fun InspectorDetailsContent(
                     color = MaterialTheme.colorScheme.primary,
                 )
                 Text(
-                    text = selectedAsset?.displayName ?: "Clip ${selectedClip.clipId.take(6)}",
+                    text = when {
+                        selectedClip.clipKind == ClipKind.TEXT -> "Text: ${selectedClip.textSpec?.text?.ifBlank { "Untitled" } ?: "Untitled"}"
+                        selectedClip.clipKind == ClipKind.ADJUSTMENT -> "Adjustment Layer"
+                        else -> selectedAsset?.displayName ?: "Clip ${selectedClip.clipId.take(6)}"
+                    },
                     style = MaterialTheme.typography.titleMedium,
                     color = MaterialTheme.colorScheme.onSurface,
                 )

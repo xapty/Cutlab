@@ -7,6 +7,8 @@ import com.example.core.database.CutLabDatabase
 import com.example.core.database.CutLabPreferencesRepository
 import com.example.core.media.MediaMetadataExtractor
 import com.example.core.storage.MediaStorageManager
+import com.example.engine.audio.MixedAudioPreviewPlayer
+import com.example.engine.audio.PcmAudioExtractor
 import com.example.engine.project.ProjectEngine
 import com.example.engine.project.ProjectRepository
 
@@ -21,6 +23,8 @@ class AppContainer(context: Context) {
     val metadataExtractor: MediaMetadataExtractor by lazy {
         MediaMetadataExtractor(storageManager)
     }
+    val pcmAudioExtractor: PcmAudioExtractor by lazy { PcmAudioExtractor(appContext) }
+    val mixedAudioPreviewPlayer: MixedAudioPreviewPlayer by lazy { MixedAudioPreviewPlayer() }
     val projectEngine: ProjectEngine by lazy { ProjectEngine() }
     val projectRepository: ProjectRepository by lazy {
         ProjectRepository(

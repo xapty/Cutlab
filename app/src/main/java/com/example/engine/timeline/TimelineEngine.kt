@@ -1,14 +1,28 @@
 package com.example.engine.timeline
 
+import com.example.engine.animation.AnimationEngine
 import com.example.engine.effects.EffectsEngine
+import com.example.engine.project.BezierCurveSpec
+import com.example.engine.project.BlendModePreset
 import com.example.engine.project.ClipAdjustments
+import com.example.engine.project.ClipAudioEffect
 import com.example.engine.project.ClipKind
+import com.example.engine.project.ClipShaderEffect
 import com.example.engine.project.ClipTransition
+import com.example.engine.project.FilterPreset
+import com.example.engine.project.KeyframeInterpolation
+import com.example.engine.project.KeyframeProperty
+import com.example.engine.project.KeyframeTrack
+import com.example.engine.project.LayerMask
+import com.example.engine.project.LayerTransform
 import com.example.engine.project.MediaAsset
 import com.example.engine.project.MediaType
+import com.example.engine.project.MotionPreset
 import com.example.engine.project.ProjectDocument
+import com.example.engine.project.PropertyKeyframe
 import com.example.engine.project.TextOverlaySpec
 import com.example.engine.project.TimelineClipRef
+import com.example.engine.project.TimelineMarker
 import com.example.engine.project.TimelineTrack
 import com.example.engine.project.TrackType
 import com.example.engine.project.TransitionType
@@ -18,6 +32,7 @@ import kotlin.math.abs
 const val MIN_CLIP_DURATION_MS = 100L
 const val MAX_IMAGE_CLIP_DURATION_MS = 600_000L
 const val TEXT_ASSET_PLACEHOLDER_ID = "cutlab_text_layer"
+const val ADJUSTMENT_ASSET_PLACEHOLDER_ID = "cutlab_adjustment_layer"
 
 data class ActiveClipLayer(
     val track: TimelineTrack,
@@ -33,6 +48,7 @@ data class ActiveTimelineFrame(
     val visualLayers: List<ActiveClipLayer>,
     val audioLayers: List<ActiveClipLayer>,
     val textLayers: List<ActiveClipLayer> = emptyList(),
+    val adjustmentLayers: List<ActiveClipLayer> = emptyList(),
     val outgoingVisualLayer: ActiveClipLayer? = null,
 ) {
     val primaryVisualLayer: ActiveClipLayer?
@@ -49,7 +65,9 @@ data class ClipTransformResult(
     val snappedTargetMs: Long? = null,
 )
 
-class TimelineEngine {
+class TimelineEngine(
+    private val animationEngine: AnimationEngine = AnimationEngine(),
+) {
 
     fun calculateTimelineDurationMs(document: ProjectDocument): Long {
         return document.tracks
@@ -65,6 +83,7 @@ class TimelineEngine {
         val visualLayers = mutableListOf<ActiveClipLayer>()
         val textLayers = mutableListOf<ActiveClipLayer>()
         val audioLayers = mutableListOf<ActiveClipLayer>()
+        val adjustmentLayers = mutableListOf<ActiveClipLayer>()
         var outgoingVisualLayer: ActiveClipLayer? = null
 
         for (track in sortedTracks) {
@@ -120,7 +139,7 @@ class TimelineEngine {
                 TrackType.VIDEO, TrackType.OVERLAY -> visualLayers += layer
                 TrackType.TEXT -> textLayers += layer
                 TrackType.AUDIO -> audioLayers += layer
-                TrackType.ADJUSTMENT -> Unit
+                TrackType.ADJUSTMENT -> adjustmentLayers += layer
             }
         }
 
@@ -129,6 +148,7 @@ class TimelineEngine {
             visualLayers = visualLayers,
             audioLayers = audioLayers,
             textLayers = textLayers,
+            adjustmentLayers = adjustmentLayers,
             outgoingVisualLayer = outgoingVisualLayer,
         )
     }
@@ -138,7 +158,9 @@ class TimelineEngine {
         clip: TimelineClipRef,
         clipRelativeMs: Long,
     ): Float {
-        if (track.isMuted || clip.isMuted || clip.volume <= 0f) return 0f
+        if (track.isMuted || clip.isMuted) return 0f
+        val keyframedVolume = animationEngine.evaluateVolume(clip, clipRelativeMs)
+        if (keyframedVolume <= 0f) return 0f
         var envelope = 1f
         if (clip.fadeInMs > 0L && clipRelativeMs < clip.fadeInMs) {
             envelope *= (clipRelativeMs.toFloat() / clip.fadeInMs.toFloat()).coerceIn(0f, 1f)
@@ -147,7 +169,7 @@ class TimelineEngine {
         if (clip.fadeOutMs > 0L && remainingMs < clip.fadeOutMs) {
             envelope *= (remainingMs.toFloat() / clip.fadeOutMs.toFloat()).coerceIn(0f, 1f)
         }
-        return (clip.volume * envelope).coerceIn(0f, 2.0f)
+        return (keyframedVolume * envelope).coerceIn(0f, 2.0f)
     }
 
     fun collectSnapTargets(
@@ -165,6 +187,9 @@ class TimelineEngine {
                 targets += clip.timelineStartMs
                 targets += clip.timelineStartMs + clip.durationMs
             }
+        }
+        for (marker in document.markers) {
+            if (marker.timeMs >= 0L) targets += marker.timeMs
         }
         return targets.sorted()
     }
@@ -386,6 +411,66 @@ class TimelineEngine {
         return workingDoc.copy(tracks = updatedTracks, updatedAt = nowMs) to newClip
     }
 
+    fun insertAdjustmentClip(
+        document: ProjectDocument,
+        adjustments: ClipAdjustments = ClipAdjustments(filterPreset = FilterPreset.CINEMATIC),
+        shaderEffect: ClipShaderEffect = ClipShaderEffect(),
+        targetTrackId: String? = null,
+        atTimelineMs: Long? = null,
+        durationMs: Long = 3_000L,
+        nowMs: Long = System.currentTimeMillis(),
+    ): Pair<ProjectDocument, TimelineClipRef?> {
+        var workingDoc = document
+        var targetTrack = if (targetTrackId != null) {
+            workingDoc.tracks.firstOrNull {
+                it.id == targetTrackId && it.type == TrackType.ADJUSTMENT && !it.isLocked
+            }
+        } else {
+            workingDoc.tracks.firstOrNull { it.type == TrackType.ADJUSTMENT && !it.isLocked }
+        }
+        if (targetTrack == null && targetTrackId == null) {
+            val hasLockedOnly = workingDoc.tracks.any { it.type == TrackType.ADJUSTMENT && it.isLocked }
+            if (hasLockedOnly) return document to null
+            val (docWithTrack, newTrack) = addTrack(workingDoc, TrackType.ADJUSTMENT, nowMs)
+            workingDoc = docWithTrack
+            targetTrack = newTrack
+        }
+        val resolvedTrack = targetTrack ?: return document to null
+
+        val safeDuration = durationMs.coerceIn(MIN_CLIP_DURATION_MS, MAX_IMAGE_CLIP_DURATION_MS)
+        val desiredStart = (atTimelineMs ?: (
+            resolvedTrack.clips.maxOfOrNull { it.timelineStartMs + it.durationMs } ?: 0L
+        )).coerceAtLeast(0L)
+
+        val nonOverlappingStart = resolveNonOverlappingStart(
+            existingClips = resolvedTrack.clips,
+            desiredStartMs = desiredStart,
+            durationMs = safeDuration,
+        )
+
+        val newClip = TimelineClipRef(
+            clipId = UUID.randomUUID().toString(),
+            assetId = ADJUSTMENT_ASSET_PLACEHOLDER_ID,
+            trackId = resolvedTrack.id,
+            timelineStartMs = nonOverlappingStart,
+            sourceStartMs = 0L,
+            durationMs = safeDuration,
+            sourceTotalDurationMs = MAX_IMAGE_CLIP_DURATION_MS,
+            clipKind = ClipKind.ADJUSTMENT,
+            adjustments = adjustments,
+            shaderEffect = shaderEffect,
+        )
+
+        val updatedTracks = workingDoc.tracks.map { track ->
+            if (track.id == resolvedTrack.id) {
+                track.copy(clips = (track.clips + newClip).sortedBy { it.timelineStartMs })
+            } else {
+                track
+            }
+        }
+        return workingDoc.copy(tracks = updatedTracks, updatedAt = nowMs) to newClip
+    }
+
     fun updateClipText(
         document: ProjectDocument,
         clipId: String,
@@ -409,7 +494,7 @@ class TimelineEngine {
         if (ownerTrack.isLocked) return document
 
         val clip = ownerTrack.clips.first { it.clipId == clipId }
-        if (clip.clipKind == ClipKind.TEXT || isImageClip) return document
+        if (clip.clipKind != ClipKind.MEDIA || isImageClip) return document
 
         val clampedSpeed = newSpeed.coerceIn(0.25f, 4.0f)
         if (abs(clampedSpeed - clip.speed) < 0.001f) return document
@@ -429,6 +514,15 @@ class TimelineEngine {
             (clip.timelineStartMs + newDurationMs) - nextClipStart
         } else 0L
 
+        val durationRatio = newDurationMs.toFloat() / clip.durationMs.coerceAtLeast(1L).toFloat()
+        val rescaledKeyframes = clip.keyframeTracks.map { kTrack ->
+            kTrack.copy(
+                keyframes = kTrack.keyframes.map { kf ->
+                    kf.copy(timeMs = (kf.timeMs * durationRatio).toLong().coerceIn(0L, newDurationMs))
+                }.sortedBy { it.timeMs },
+            )
+        }
+
         val updatedClip = clip.copy(
             speed = clampedSpeed,
             durationMs = newDurationMs,
@@ -437,6 +531,7 @@ class TimelineEngine {
             transitionIn = clip.transitionIn?.let {
                 it.copy(durationMs = it.durationMs.coerceAtMost(newDurationMs))
             },
+            keyframeTracks = rescaledKeyframes,
         )
 
         val updatedClips = sortedClips.map { c ->
@@ -476,6 +571,92 @@ class TimelineEngine {
         )
     }
 
+    fun updateClipAudioEffect(
+        document: ProjectDocument,
+        clipId: String,
+        audioEffect: ClipAudioEffect,
+        nowMs: Long = System.currentTimeMillis(),
+    ): ProjectDocument = updateClipById(document, clipId, nowMs) { clip ->
+        clip.copy(
+            audioEffect = audioEffect.copy(
+                pan = audioEffect.pan.coerceIn(-1f, 1f),
+                bassDb = audioEffect.bassDb.coerceIn(-12f, 12f),
+                trebleDb = audioEffect.trebleDb.coerceIn(-12f, 12f),
+                echoMix = audioEffect.echoMix.coerceIn(0f, 0.75f),
+            ),
+        )
+    }
+
+    fun addTimelineMarker(
+        document: ProjectDocument,
+        timeMs: Long,
+        label: String = "Beat",
+        isBeatMarker: Boolean = true,
+        nowMs: Long = System.currentTimeMillis(),
+    ): Pair<ProjectDocument, TimelineMarker> {
+        val safeTime = timeMs.coerceAtLeast(0L)
+        val existing = document.markers.firstOrNull { abs(it.timeMs - safeTime) <= 60L }
+        if (existing != null) return document to existing
+
+        val marker = TimelineMarker(
+            id = UUID.randomUUID().toString(),
+            timeMs = safeTime,
+            label = label.ifBlank { "Marker" },
+            isBeatMarker = isBeatMarker,
+        )
+        val next = (document.markers + marker).sortedBy { it.timeMs }
+        return document.copy(markers = next, updatedAt = nowMs) to marker
+    }
+
+    fun addBeatMarkersFromClip(
+        document: ProjectDocument,
+        clip: TimelineClipRef,
+        assetBeatTimestampsMs: List<Long>,
+        nowMs: Long = System.currentTimeMillis(),
+    ): ProjectDocument {
+        if (assetBeatTimestampsMs.isEmpty()) return document
+        val clipEndSourceMs = clip.sourceStartMs + (clip.durationMs * clip.speed).toLong()
+        val mapped = assetBeatTimestampsMs
+            .filter { it in clip.sourceStartMs..clipEndSourceMs }
+            .map { srcBeat ->
+                val relTimelineMs = ((srcBeat - clip.sourceStartMs) / clip.speed.coerceAtLeast(0.25f)).toLong()
+                clip.timelineStartMs + relTimelineMs
+            }
+        var working = document
+        var added = 0
+        for (tMs in mapped) {
+            if (working.markers.none { abs(it.timeMs - tMs) <= 120L }) {
+                added++
+                val marker = TimelineMarker(
+                    id = UUID.randomUUID().toString(),
+                    timeMs = tMs,
+                    label = "Beat ${working.markers.size + 1}",
+                    isBeatMarker = true,
+                )
+                working = working.copy(markers = (working.markers + marker).sortedBy { it.timeMs }, updatedAt = nowMs)
+            }
+            if (added >= 32) break
+        }
+        return working
+    }
+
+    fun removeTimelineMarker(
+        document: ProjectDocument,
+        markerId: String,
+        nowMs: Long = System.currentTimeMillis(),
+    ): ProjectDocument {
+        val next = document.markers.filterNot { it.id == markerId }
+        return if (next.size == document.markers.size) document else document.copy(markers = next, updatedAt = nowMs)
+    }
+
+    fun clearTimelineMarkers(
+        document: ProjectDocument,
+        nowMs: Long = System.currentTimeMillis(),
+    ): ProjectDocument {
+        if (document.markers.isEmpty()) return document
+        return document.copy(markers = emptyList(), updatedAt = nowMs)
+    }
+
     fun updateClipTransition(
         document: ProjectDocument,
         clipId: String,
@@ -494,8 +675,215 @@ class TimelineEngine {
         adjustments: ClipAdjustments,
         nowMs: Long = System.currentTimeMillis(),
     ): ProjectDocument = updateClipById(document, clipId, nowMs) { clip ->
-        if (clip.clipKind != ClipKind.MEDIA) return@updateClipById clip
+        if (clip.clipKind == ClipKind.TEXT) return@updateClipById clip
         clip.copy(adjustments = adjustments)
+    }
+
+    fun updateClipTransform(
+        document: ProjectDocument,
+        clipId: String,
+        transform: LayerTransform,
+        nowMs: Long = System.currentTimeMillis(),
+    ): ProjectDocument = updateClipById(document, clipId, nowMs) { clip ->
+        if (clip.clipKind == ClipKind.ADJUSTMENT) return@updateClipById clip
+        clip.copy(
+            transform = transform.copy(
+                positionX = transform.positionX.coerceIn(-1f, 1f),
+                positionY = transform.positionY.coerceIn(-1f, 1f),
+                scaleX = transform.scaleX.coerceIn(0.1f, 4.0f),
+                scaleY = transform.scaleY.coerceIn(0.1f, 4.0f),
+                rotationDeg = transform.rotationDeg.coerceIn(-360f, 360f),
+                opacity = transform.opacity.coerceIn(0f, 1f),
+                anchorX = transform.anchorX.coerceIn(0f, 1f),
+                anchorY = transform.anchorY.coerceIn(0f, 1f),
+            ),
+        )
+    }
+
+    fun updateClipBlendMode(
+        document: ProjectDocument,
+        clipId: String,
+        blendMode: BlendModePreset,
+        nowMs: Long = System.currentTimeMillis(),
+    ): ProjectDocument = updateClipById(document, clipId, nowMs) { clip ->
+        if (clip.clipKind == ClipKind.ADJUSTMENT) return@updateClipById clip
+        clip.copy(blendMode = blendMode)
+    }
+
+    fun updateClipMask(
+        document: ProjectDocument,
+        clipId: String,
+        mask: LayerMask,
+        nowMs: Long = System.currentTimeMillis(),
+    ): ProjectDocument = updateClipById(document, clipId, nowMs) { clip ->
+        if (clip.clipKind != ClipKind.MEDIA) return@updateClipById clip
+        clip.copy(
+            mask = mask.copy(
+                centerX = mask.centerX.coerceIn(0f, 1f),
+                centerY = mask.centerY.coerceIn(0f, 1f),
+                width = mask.width.coerceIn(0.05f, 1.5f),
+                height = mask.height.coerceIn(0.05f, 1.5f),
+                feather = mask.feather.coerceIn(0f, 0.5f),
+                cornerRadius = mask.cornerRadius.coerceIn(0f, 0.5f),
+            ),
+        )
+    }
+
+    fun updateClipShaderEffect(
+        document: ProjectDocument,
+        clipId: String,
+        shaderEffect: ClipShaderEffect,
+        nowMs: Long = System.currentTimeMillis(),
+    ): ProjectDocument = updateClipById(document, clipId, nowMs) { clip ->
+        if (clip.clipKind == ClipKind.TEXT) return@updateClipById clip
+        clip.copy(
+            shaderEffect = shaderEffect.copy(intensity = shaderEffect.intensity.coerceIn(0f, 1f)),
+        )
+    }
+
+    // --- Phase 6: Keyframe & Animation Operations ---
+
+    fun upsertKeyframe(
+        document: ProjectDocument,
+        clipId: String,
+        property: KeyframeProperty,
+        timeMs: Long,
+        value: Float,
+        interpolation: KeyframeInterpolation = KeyframeInterpolation.EASE_IN_OUT,
+        bezier: BezierCurveSpec = BezierCurveSpec(),
+        nowMs: Long = System.currentTimeMillis(),
+    ): Pair<ProjectDocument, PropertyKeyframe?> {
+        var createdOrUpdated: PropertyKeyframe? = null
+        val updated = updateClipById(document, clipId, nowMs) { clip ->
+            val clampedTime = timeMs.coerceIn(0L, clip.durationMs)
+            val clampedValue = value.coerceIn(property.minValue, property.maxValue)
+            val existingTrack = clip.keyframeTracks.firstOrNull { it.property == property }
+            val existingList = existingTrack?.keyframes.orEmpty()
+            val nearby = existingList.firstOrNull { abs(it.timeMs - clampedTime) <= 30L }
+
+            val nextKf = nearby?.copy(
+                timeMs = clampedTime,
+                value = clampedValue,
+                interpolation = interpolation,
+                bezier = bezier,
+            ) ?: PropertyKeyframe(
+                id = UUID.randomUUID().toString(),
+                timeMs = clampedTime,
+                value = clampedValue,
+                interpolation = interpolation,
+                bezier = bezier,
+            )
+            createdOrUpdated = nextKf
+
+            val nextList = (existingList.filterNot { it.id == nextKf.id } + nextKf).sortedBy { it.timeMs }
+            val nextTracks = clip.keyframeTracks
+                .filterNot { it.property == property }
+                .plus(KeyframeTrack(property = property, keyframes = nextList))
+                .sortedBy { it.property.ordinal }
+            clip.copy(keyframeTracks = nextTracks)
+        }
+        return updated to createdOrUpdated
+    }
+
+    fun updateKeyframeById(
+        document: ProjectDocument,
+        clipId: String,
+        property: KeyframeProperty,
+        keyframeId: String,
+        newTimeMs: Long? = null,
+        newValue: Float? = null,
+        interpolation: KeyframeInterpolation? = null,
+        bezier: BezierCurveSpec? = null,
+        nowMs: Long = System.currentTimeMillis(),
+    ): ProjectDocument = updateClipById(document, clipId, nowMs) { clip ->
+        val nextTracks = clip.keyframeTracks.map { kTrack ->
+            if (kTrack.property != property) {
+                kTrack
+            } else {
+                val updatedList = kTrack.keyframes.map { kf ->
+                    if (kf.id == keyframeId) {
+                        kf.copy(
+                            timeMs = (newTimeMs ?: kf.timeMs).coerceIn(0L, clip.durationMs),
+                            value = (newValue ?: kf.value).coerceIn(property.minValue, property.maxValue),
+                            interpolation = interpolation ?: kf.interpolation,
+                            bezier = bezier ?: kf.bezier,
+                        )
+                    } else {
+                        kf
+                    }
+                }.sortedBy { it.timeMs }
+                kTrack.copy(keyframes = updatedList)
+            }
+        }
+        clip.copy(keyframeTracks = nextTracks)
+    }
+
+    fun updateMultipleKeyframesInterpolation(
+        document: ProjectDocument,
+        clipId: String,
+        property: KeyframeProperty,
+        keyframeIds: Set<String>,
+        interpolation: KeyframeInterpolation,
+        bezier: BezierCurveSpec? = null,
+        nowMs: Long = System.currentTimeMillis(),
+    ): ProjectDocument = updateClipById(document, clipId, nowMs) { clip ->
+        val nextTracks = clip.keyframeTracks.map { kTrack ->
+            if (kTrack.property != property) {
+                kTrack
+            } else {
+                kTrack.copy(
+                    keyframes = kTrack.keyframes.map { kf ->
+                        if (kf.id in keyframeIds) {
+                            kf.copy(
+                                interpolation = interpolation,
+                                bezier = bezier ?: kf.bezier,
+                            )
+                        } else {
+                            kf
+                        }
+                    },
+                )
+            }
+        }
+        clip.copy(keyframeTracks = nextTracks)
+    }
+
+    fun removeKeyframes(
+        document: ProjectDocument,
+        clipId: String,
+        property: KeyframeProperty,
+        keyframeIds: Set<String>,
+        nowMs: Long = System.currentTimeMillis(),
+    ): ProjectDocument = updateClipById(document, clipId, nowMs) { clip ->
+        if (keyframeIds.isEmpty()) return@updateClipById clip
+        val nextTracks = clip.keyframeTracks.mapNotNull { kTrack ->
+            if (kTrack.property != property) {
+                kTrack
+            } else {
+                val filtered = kTrack.keyframes.filterNot { it.id in keyframeIds }
+                if (filtered.isEmpty()) null else kTrack.copy(keyframes = filtered)
+            }
+        }
+        clip.copy(keyframeTracks = nextTracks)
+    }
+
+    fun clearKeyframeTrack(
+        document: ProjectDocument,
+        clipId: String,
+        property: KeyframeProperty,
+        nowMs: Long = System.currentTimeMillis(),
+    ): ProjectDocument = updateClipById(document, clipId, nowMs) { clip ->
+        clip.copy(keyframeTracks = clip.keyframeTracks.filterNot { it.property == property })
+    }
+
+    fun applyMotionPresetToClip(
+        document: ProjectDocument,
+        clipId: String,
+        preset: MotionPreset,
+        nowMs: Long = System.currentTimeMillis(),
+    ): ProjectDocument = updateClipById(document, clipId, nowMs) { clip ->
+        val nextTracks = animationEngine.generatePresetKeyframeTracks(clip, preset)
+        clip.copy(keyframeTracks = nextTracks)
     }
 
     fun applyAdjustmentsToAllVisualClips(
@@ -565,6 +953,9 @@ class TimelineEngine {
 
         val leftDuration = splitTimelineMs - targetClip.timelineStartMs
         val rightDuration = targetClip.durationMs - leftDuration
+
+        val (leftTracks, rightTracks) = splitKeyframeTracks(targetClip, leftDuration, rightDuration)
+
         val leftClip = targetClip.copy(
             durationMs = leftDuration,
             fadeInMs = targetClip.fadeInMs.coerceAtMost(leftDuration),
@@ -572,6 +963,7 @@ class TimelineEngine {
             transitionIn = targetClip.transitionIn?.let {
                 it.copy(durationMs = it.durationMs.coerceAtMost(leftDuration))
             },
+            keyframeTracks = leftTracks,
         )
         val rightClipId = UUID.randomUUID().toString()
         val rightClip = targetClip.copy(
@@ -582,6 +974,7 @@ class TimelineEngine {
             fadeInMs = 0L,
             fadeOutMs = targetClip.fadeOutMs.coerceAtMost(rightDuration),
             transitionIn = null,
+            keyframeTracks = rightTracks,
         )
 
         val updatedTracks = document.tracks.map { track ->
@@ -623,7 +1016,7 @@ class TimelineEngine {
         val prevClipEnd = if (clipIndex > 0) {
             sortedClips[clipIndex - 1].let { it.timelineStartMs + it.durationMs }
         } else 0L
-        val earliestSourceLimit = if (clip.clipKind == ClipKind.TEXT) {
+        val earliestSourceLimit = if (clip.clipKind != ClipKind.MEDIA) {
             0L
         } else {
             clip.timelineStartMs - (clip.sourceStartMs / clip.speed).toLong()
@@ -637,7 +1030,7 @@ class TimelineEngine {
         }
 
         val deltaTimeline = clampedStart - clip.timelineStartMs
-        val newSourceStart = if (clip.clipKind == ClipKind.TEXT) {
+        val newSourceStart = if (clip.clipKind != ClipKind.MEDIA) {
             0L
         } else {
             (clip.sourceStartMs + (deltaTimeline * clip.speed).toLong()).coerceAtLeast(0L)
@@ -652,6 +1045,7 @@ class TimelineEngine {
             transitionIn = clip.transitionIn?.let {
                 it.copy(durationMs = it.durationMs.coerceAtMost(newDuration))
             },
+            keyframeTracks = shiftAndClampKeyframes(clip.keyframeTracks, -deltaTimeline, newDuration),
         )
 
         val updatedTracks = document.tracks.map { track ->
@@ -696,7 +1090,7 @@ class TimelineEngine {
         } else Long.MAX_VALUE
 
         val resolvedSourceCap = maxOf(maxSourceDurationMs, clip.sourceTotalDurationMs)
-        val sourceEndLimit = if (resolvedSourceCap > 0L && clip.clipKind != ClipKind.TEXT) {
+        val sourceEndLimit = if (resolvedSourceCap > 0L && clip.clipKind == ClipKind.MEDIA) {
             val remainingSource = ((resolvedSourceCap - clip.sourceStartMs) / clip.speed).toLong()
                 .coerceAtLeast(MIN_CLIP_DURATION_MS)
             clip.timelineStartMs + remainingSource
@@ -718,6 +1112,7 @@ class TimelineEngine {
             transitionIn = clip.transitionIn?.let {
                 it.copy(durationMs = it.durationMs.coerceAtMost(newDuration))
             },
+            keyframeTracks = shiftAndClampKeyframes(clip.keyframeTracks, 0L, newDuration),
         )
         val updatedTracks = document.tracks.map { track ->
             if (track.id == ownerTrack.id) {
@@ -753,6 +1148,7 @@ class TimelineEngine {
             val candidate = document.tracks.firstOrNull { it.id == targetTrackId }
             val typeOk = when {
                 clip.clipKind == ClipKind.TEXT -> candidate?.type == TrackType.TEXT
+                clip.clipKind == ClipKind.ADJUSTMENT -> candidate?.type == TrackType.ADJUSTMENT
                 assetType != null -> candidate != null && candidate.type in compatibleTrackTypes(assetType)
                 else -> candidate?.type == sourceTrack.type
             }
@@ -953,5 +1349,66 @@ class TimelineEngine {
         }
         candidates += sorted.last().let { it.timelineStartMs + it.durationMs }
         return candidates.minByOrNull { abs(it - desired) } ?: desired
+    }
+
+    private fun splitKeyframeTracks(
+        clip: TimelineClipRef,
+        leftDurationMs: Long,
+        rightDurationMs: Long,
+    ): Pair<List<KeyframeTrack>, List<KeyframeTrack>> {
+        if (clip.keyframeTracks.isEmpty()) return emptyList<KeyframeTrack>() to emptyList()
+        val leftList = mutableListOf<KeyframeTrack>()
+        val rightList = mutableListOf<KeyframeTrack>()
+        for (track in clip.keyframeTracks) {
+            val splitValue = animationEngine.evaluateProperty(clip, track.property, leftDurationMs)
+            val leftKfs = track.keyframes
+                .filter { it.timeMs < leftDurationMs }
+                .toMutableList()
+            val rightKfs = track.keyframes
+                .filter { it.timeMs > leftDurationMs }
+                .map { it.copy(id = UUID.randomUUID().toString(), timeMs = (it.timeMs - leftDurationMs).coerceIn(0L, rightDurationMs)) }
+                .toMutableList()
+
+            if (track.keyframes.any { it.timeMs <= leftDurationMs } && track.keyframes.any { it.timeMs >= leftDurationMs }) {
+                leftKfs += PropertyKeyframe(
+                    id = UUID.randomUUID().toString(),
+                    timeMs = leftDurationMs,
+                    value = splitValue,
+                    interpolation = KeyframeInterpolation.LINEAR,
+                )
+                rightKfs.add(
+                    0,
+                    PropertyKeyframe(
+                        id = UUID.randomUUID().toString(),
+                        timeMs = 0L,
+                        value = splitValue,
+                        interpolation = track.keyframes.lastOrNull { it.timeMs <= leftDurationMs }?.interpolation
+                            ?: KeyframeInterpolation.EASE_IN_OUT,
+                    ),
+                )
+            }
+            if (leftKfs.isNotEmpty()) leftList += track.copy(keyframes = leftKfs.sortedBy { it.timeMs })
+            if (rightKfs.isNotEmpty()) rightList += track.copy(keyframes = rightKfs.sortedBy { it.timeMs })
+        }
+        return leftList to rightList
+    }
+
+    private fun shiftAndClampKeyframes(
+        tracks: List<KeyframeTrack>,
+        offsetMs: Long,
+        newDurationMs: Long,
+    ): List<KeyframeTrack> {
+        if (tracks.isEmpty()) return emptyList()
+        return tracks.mapNotNull { track ->
+            val shifted = track.keyframes.mapNotNull { kf ->
+                val t = kf.timeMs + offsetMs
+                if (t < -50L || t > newDurationMs + 50L) {
+                    null
+                } else {
+                    kf.copy(timeMs = t.coerceIn(0L, newDurationMs))
+                }
+            }.sortedBy { it.timeMs }
+            if (shifted.isEmpty()) null else track.copy(keyframes = shifted)
+        }
     }
 }

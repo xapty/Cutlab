@@ -60,6 +60,7 @@ enum class TrackType(val shortPrefix: String, val label: String) {
 enum class ClipKind {
     MEDIA,
     TEXT,
+    ADJUSTMENT,
 }
 
 @Serializable
@@ -111,6 +112,7 @@ data class ClipAdjustments(
     val saturation: Float = 1f,
     val exposure: Float = 0f,
     val temperature: Float = 0f,
+    val tint: Float = 0f,
     val vignette: Float = 0f,
     val blurRadius: Float = 0f,
     val sharpen: Float = 0f,
@@ -122,9 +124,89 @@ data class ClipAdjustments(
             saturation == 1f &&
             exposure == 0f &&
             temperature == 0f &&
+            tint == 0f &&
             vignette == 0f &&
             blurRadius == 0f &&
             sharpen == 0f
+}
+
+@Serializable
+enum class BlendModePreset(val label: String, val shaderId: Int) {
+    NORMAL("Normal", 0),
+    ADD("Add", 1),
+    MULTIPLY("Multiply", 2),
+    SCREEN("Screen", 3),
+    OVERLAY("Overlay", 4),
+    DARKEN("Darken", 5),
+    LIGHTEN("Lighten", 6),
+}
+
+@Serializable
+data class LayerTransform(
+    val positionX: Float = 0f,
+    val positionY: Float = 0f,
+    val scaleX: Float = 1f,
+    val scaleY: Float = 1f,
+    val rotationDeg: Float = 0f,
+    val opacity: Float = 1f,
+    val anchorX: Float = 0.5f,
+    val anchorY: Float = 0.5f,
+    val uniformScale: Boolean = true,
+) {
+    val isDefault: Boolean
+        get() = positionX == 0f &&
+            positionY == 0f &&
+            scaleX == 1f &&
+            scaleY == 1f &&
+            rotationDeg == 0f &&
+            opacity == 1f &&
+            anchorX == 0.5f &&
+            anchorY == 0.5f
+}
+
+@Serializable
+enum class MaskShape(val label: String, val shaderId: Int) {
+    NONE("None", 0),
+    RECTANGLE("Rectangle", 1),
+    ELLIPSE("Ellipse", 2),
+    LINEAR_SPLIT("Linear Split", 3),
+}
+
+@Serializable
+data class LayerMask(
+    val shape: MaskShape = MaskShape.NONE,
+    val centerX: Float = 0.5f,
+    val centerY: Float = 0.5f,
+    val width: Float = 0.65f,
+    val height: Float = 0.65f,
+    val rotationDeg: Float = 0f,
+    val feather: Float = 0.08f,
+    val cornerRadius: Float = 0.08f,
+    val inverted: Boolean = false,
+) {
+    val isActive: Boolean
+        get() = shape != MaskShape.NONE
+}
+
+@Serializable
+enum class ShaderEffectType(val label: String, val shaderId: Int) {
+    NONE("None", 0),
+    CHROMATIC_ABERRATION("Chromatic", 1),
+    RGB_SPLIT("RGB Split", 2),
+    FILM_GRAIN("Film Grain", 3),
+    GLOW("Bloom Glow", 4),
+    VHS_SCANLINES("VHS Scan", 5),
+    PIXELATE("Pixelate", 6),
+    SHARPEN_EDGE("Crisp Edge", 7),
+}
+
+@Serializable
+data class ClipShaderEffect(
+    val type: ShaderEffectType = ShaderEffectType.NONE,
+    val intensity: Float = 0.5f,
+) {
+    val isActive: Boolean
+        get() = type != ShaderEffectType.NONE && intensity > 0.01f
 }
 
 @Serializable
@@ -170,6 +252,108 @@ data class TextOverlaySpec(
 )
 
 @Serializable
+enum class KeyframeProperty(
+    val label: String,
+    val minValue: Float,
+    val maxValue: Float,
+    val defaultValue: Float,
+    val unitSuffix: String,
+) {
+    POSITION_X("Pos X", -1f, 1f, 0f, "%"),
+    POSITION_Y("Pos Y", -1f, 1f, 0f, "%"),
+    SCALE_X("Scale X", 0.1f, 4.0f, 1f, "x"),
+    SCALE_Y("Scale Y", 0.1f, 4.0f, 1f, "x"),
+    ROTATION("Rotation", -360f, 360f, 0f, "°"),
+    OPACITY("Opacity", 0f, 1f, 1f, "%"),
+    ANCHOR_X("Anchor X", 0f, 1f, 0.5f, "%"),
+    ANCHOR_Y("Anchor Y", 0f, 1f, 0.5f, "%"),
+    VOLUME("Volume", 0f, 2f, 1f, "%"),
+    BLUR("Blur", 0f, 24f, 0f, "px"),
+    SHADER_INTENSITY("Shader FX", 0f, 1f, 0.5f, "%"),
+    MASK_FEATHER("Feather", 0f, 0.5f, 0.08f, "%"),
+    TEXT_FONT_SCALE("Text Size", 0.5f, 2.5f, 1f, "x"),
+}
+
+@Serializable
+enum class KeyframeInterpolation(val label: String) {
+    LINEAR("Linear"),
+    EASE_IN("Ease In"),
+    EASE_OUT("Ease Out"),
+    EASE_IN_OUT("Ease In-Out"),
+    CUBIC_BEZIER("Bezier"),
+    HOLD("Hold"),
+}
+
+@Serializable
+data class BezierCurveSpec(
+    val x1: Float = 0.42f,
+    val y1: Float = 0.0f,
+    val x2: Float = 0.58f,
+    val y2: Float = 1.0f,
+)
+
+@Serializable
+data class PropertyKeyframe(
+    val id: String,
+    val timeMs: Long,
+    val value: Float,
+    val interpolation: KeyframeInterpolation = KeyframeInterpolation.EASE_IN_OUT,
+    val bezier: BezierCurveSpec = BezierCurveSpec(),
+)
+
+@Serializable
+data class KeyframeTrack(
+    val property: KeyframeProperty,
+    val keyframes: List<PropertyKeyframe> = emptyList(),
+)
+
+@Serializable
+enum class MotionPreset(val label: String) {
+    OVERSHOOT("Overshoot"),
+    BOUNCE("Bounce"),
+    ELASTIC("Elastic"),
+    SHAKE("Shake"),
+    SMOOTH_ZOOM("Smooth Zoom"),
+    CAMERA_PAN("Camera Pan"),
+    FADE_IN_OUT("Fade In/Out"),
+    SLIDE_IN("Slide In"),
+}
+
+@Serializable
+enum class AudioEffectPreset(val label: String) {
+    NONE("Original"),
+    WARM_BASS("Warm Bass"),
+    VOCAL_CLEAR("Vocal Clear"),
+    PHONE_RADIO("Radio"),
+    ECHO_ROOM("Echo Room"),
+    STUDIO_PUNCH("Studio Punch"),
+}
+
+@Serializable
+data class ClipAudioEffect(
+    val preset: AudioEffectPreset = AudioEffectPreset.NONE,
+    val pan: Float = 0f,         // -1.0 (Left) .. +1.0 (Right)
+    val bassDb: Float = 0f,      // -12.0 .. +12.0 dB
+    val trebleDb: Float = 0f,    // -12.0 .. +12.0 dB
+    val echoMix: Float = 0f,     // 0.0 .. 0.75
+) {
+    val isDefault: Boolean
+        get() = preset == AudioEffectPreset.NONE &&
+            pan == 0f &&
+            bassDb == 0f &&
+            trebleDb == 0f &&
+            echoMix == 0f
+}
+
+@Serializable
+data class TimelineMarker(
+    val id: String,
+    val timeMs: Long,
+    val label: String = "Beat",
+    val isBeatMarker: Boolean = true,
+)
+
+@Serializable
 data class TimelineClipRef(
     val clipId: String,
     val assetId: String,
@@ -187,6 +371,12 @@ data class TimelineClipRef(
     val transitionIn: ClipTransition? = null,
     val adjustments: ClipAdjustments = ClipAdjustments(),
     val textSpec: TextOverlaySpec? = null,
+    val blendMode: BlendModePreset = BlendModePreset.NORMAL,
+    val transform: LayerTransform = LayerTransform(),
+    val mask: LayerMask = LayerMask(),
+    val shaderEffect: ClipShaderEffect = ClipShaderEffect(),
+    val keyframeTracks: List<KeyframeTrack> = emptyList(),
+    val audioEffect: ClipAudioEffect = ClipAudioEffect(),
 )
 
 @Serializable
@@ -222,6 +412,7 @@ data class ProjectDocument(
     val exportSettings: ExportSettingsSpec,
     val createdAt: Long,
     val updatedAt: Long,
+    val markers: List<TimelineMarker> = emptyList(),
 )
 
 data class MediaAsset(

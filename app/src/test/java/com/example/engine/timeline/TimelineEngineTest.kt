@@ -1,15 +1,22 @@
 package com.example.engine.timeline
 
 import com.example.engine.project.AspectRatioPreset
+import com.example.engine.project.BlendModePreset
 import com.example.engine.project.ClipAdjustments
+import com.example.engine.project.ClipKind
+import com.example.engine.project.ClipShaderEffect
 import com.example.engine.project.ClipTransition
 import com.example.engine.project.EasingPreset
 import com.example.engine.project.EditorMode
 import com.example.engine.project.FilterPreset
+import com.example.engine.project.LayerMask
+import com.example.engine.project.LayerTransform
+import com.example.engine.project.MaskShape
 import com.example.engine.project.MediaAsset
 import com.example.engine.project.MediaStatus
 import com.example.engine.project.MediaType
 import com.example.engine.project.ProjectEngine
+import com.example.engine.project.ShaderEffectType
 import com.example.engine.project.TextAnimationPreset
 import com.example.engine.project.TextOverlaySpec
 import com.example.engine.project.TrackType
@@ -358,5 +365,214 @@ class TimelineEngineTest {
         assertEquals(1, frameAt1000.textLayers.size)
         assertEquals("DROP", frameAt1000.textLayers.first().clip.textSpec?.text)
         assertEquals(FilterPreset.CINEMATIC, frameAt1000.primaryVisualLayer?.clip?.adjustments?.filterPreset)
+    }
+
+    @Test
+    fun `phase 5 insertAdjustmentClip and compositor clip properties update and evaluate cleanly`() {
+        val doc0 = projectEngine.createNewDocument(
+            name = "Phase 5 Compositor",
+            aspectRatio = AspectRatioPreset.LANDSCAPE_16_9,
+            fps = 30,
+            editorMode = EditorMode.ADVANCED,
+        )
+        val v1 = sampleAsset("v1", MediaType.VIDEO, durationMs = 4_000L)
+        val (doc1, vClip) = timelineEngine.insertAssetAsClip(doc0, v1)
+        val (doc2, adjClip) = timelineEngine.insertAdjustmentClip(
+            document = doc1,
+            adjustments = ClipAdjustments(filterPreset = FilterPreset.CYBER_NEON),
+            shaderEffect = ClipShaderEffect(ShaderEffectType.GLOW, intensity = 0.65f),
+            atTimelineMs = 500L,
+            durationMs = 2_000L,
+        )
+        assertNotNull(adjClip)
+        assertEquals(ClipKind.ADJUSTMENT, adjClip!!.clipKind)
+        assertEquals(500L, adjClip.timelineStartMs)
+
+        // Transform, BlendMode, Mask, and Shader updates on video clip
+        val doc3 = timelineEngine.updateClipTransform(
+            doc2,
+            vClip!!.clipId,
+            LayerTransform(positionX = -0.2f, scaleX = 1.5f, scaleY = 1.5f, rotationDeg = 45f, opacity = 0.75f),
+        )
+        val doc4 = timelineEngine.updateClipBlendMode(doc3, vClip.clipId, BlendModePreset.MULTIPLY)
+        val doc5 = timelineEngine.updateClipMask(
+            doc4,
+            vClip.clipId,
+            LayerMask(shape = MaskShape.RECTANGLE, feather = 0.12f, inverted = true),
+        )
+        val doc6 = timelineEngine.updateClipShaderEffect(
+            doc5,
+            vClip.clipId,
+            ClipShaderEffect(ShaderEffectType.FILM_GRAIN, intensity = 0.4f),
+        )
+
+        // Adjustment clip can be trimmed like any other non-source-bounded clip
+        val trimmedAdjDoc = timelineEngine.trimClipRight(
+            document = doc6,
+            clipId = adjClip.clipId,
+            desiredEndMs = 3_500L,
+            maxSourceDurationMs = 0L,
+            snappingEnabled = false,
+        ).document
+
+        val frameActiveAdj = timelineEngine.evaluateFrame(trimmedAdjDoc, 1_500L)
+        assertEquals(1, frameActiveAdj.adjustmentLayers.size)
+        assertEquals(3_000L, frameActiveAdj.adjustmentLayers.first().clip.durationMs)
+        assertEquals(ShaderEffectType.GLOW, frameActiveAdj.adjustmentLayers.first().clip.shaderEffect.type)
+
+        val evaluatedVideo = frameActiveAdj.primaryVisualLayer!!.clip
+        assertEquals(BlendModePreset.MULTIPLY, evaluatedVideo.blendMode)
+        assertEquals(45f, evaluatedVideo.transform.rotationDeg, 0.01f)
+        assertEquals(MaskShape.RECTANGLE, evaluatedVideo.mask.shape)
+        assertTrue(evaluatedVideo.mask.inverted)
+        assertEquals(ShaderEffectType.FILM_GRAIN, evaluatedVideo.shaderEffect.type)
+
+        // After adjustment clip ends (3600ms), adjustmentLayers is empty
+        val frameAfterAdj = timelineEngine.evaluateFrame(trimmedAdjDoc, 3_600L)
+        assertTrue(frameAfterAdj.adjustmentLayers.isEmpty())
+    }
+
+    @Test
+    fun `phase 6 keyframe crud, motion presets, volume keyframes, split slicing, and speed rescaling work`() {
+        val doc0 = projectEngine.createNewDocument(
+            name = "Phase 6 Keyframes",
+            aspectRatio = AspectRatioPreset.VERTICAL_9_16,
+            fps = 30,
+            editorMode = EditorMode.ADVANCED,
+        )
+        val v1 = sampleAsset("v1", MediaType.VIDEO, durationMs = 4_000L)
+        val (doc1, vClip) = timelineEngine.insertAssetAsClip(doc0, v1)
+        val clipId = vClip!!.clipId
+
+        // Apply Overshoot preset -> populates SCALE_X and SCALE_Y tracks
+        val docPreset = timelineEngine.applyMotionPresetToClip(
+            doc1,
+            clipId,
+            com.example.engine.project.MotionPreset.OVERSHOOT,
+        )
+        val presetClip = docPreset.tracks.flatMap { it.clips }.first { it.clipId == clipId }
+        assertTrue(presetClip.keyframeTracks.any { it.property == com.example.engine.project.KeyframeProperty.SCALE_X })
+
+        // Add volume keyframes (0ms -> 0.0f, 4000ms -> 1.0f) and verify evaluateFrame volume
+        var docVol = timelineEngine.upsertKeyframe(
+            docPreset,
+            clipId,
+            com.example.engine.project.KeyframeProperty.VOLUME,
+            0L,
+            0.0f,
+            com.example.engine.project.KeyframeInterpolation.LINEAR,
+        ).first
+        docVol = timelineEngine.upsertKeyframe(
+            docVol,
+            clipId,
+            com.example.engine.project.KeyframeProperty.VOLUME,
+            4_000L,
+            1.0f,
+            com.example.engine.project.KeyframeInterpolation.LINEAR,
+        ).first
+        assertEquals(0.5f, timelineEngine.evaluateFrame(docVol, 2_000L).visualLayers.first().effectiveVolume, 0.02f)
+
+        // Update all keyframes in VOLUME track via multi-selection interpolation
+        val volIds = docVol.tracks.flatMap { it.clips }.first { it.clipId == clipId }
+            .keyframeTracks.first { it.property == com.example.engine.project.KeyframeProperty.VOLUME }
+            .keyframes.map { it.id }.toSet()
+        val docBezier = timelineEngine.updateMultipleKeyframesInterpolation(
+            docVol,
+            clipId,
+            com.example.engine.project.KeyframeProperty.VOLUME,
+            volIds,
+            com.example.engine.project.KeyframeInterpolation.CUBIC_BEZIER,
+            com.example.engine.project.BezierCurveSpec(0.16f, 1.0f, 0.3f, 1.0f),
+        )
+
+        // Split clip at 2000ms -> both halves get valid sliced/interpolated VOLUME tracks
+        val (docSplit, rightId) = timelineEngine.splitClipAt(docBezier, clipId, 2_000L)
+        assertNotNull(rightId)
+        val leftClip = docSplit.tracks.flatMap { it.clips }.first { it.clipId == clipId }
+        val rightClip = docSplit.tracks.flatMap { it.clips }.first { it.clipId == rightId }
+        assertEquals(2_000L, leftClip.keyframeTracks.first { it.property == com.example.engine.project.KeyframeProperty.VOLUME }.keyframes.last().timeMs)
+        assertEquals(0L, rightClip.keyframeTracks.first { it.property == com.example.engine.project.KeyframeProperty.VOLUME }.keyframes.first().timeMs)
+
+        // Speed 2.0x on right clip halves its duration to 1000ms and rescales keyframes proportionally
+        val docSped = timelineEngine.updateClipSpeed(docSplit, rightId!!, 2.0f)
+        val spedRight = docSped.tracks.flatMap { it.clips }.first { it.clipId == rightId }
+        assertEquals(1_000L, spedRight.durationMs)
+        val spedVolTrack = spedRight.keyframeTracks.first { it.property == com.example.engine.project.KeyframeProperty.VOLUME }
+        assertEquals(1_000L, spedVolTrack.keyframes.last().timeMs)
+
+        // Clear track removes it cleanly
+        val docCleared = timelineEngine.clearKeyframeTrack(
+            docSped,
+            rightId,
+            com.example.engine.project.KeyframeProperty.VOLUME,
+        )
+        val clearedRight = docCleared.tracks.flatMap { it.clips }.first { it.clipId == rightId }
+        assertTrue(clearedRight.keyframeTracks.none { it.property == com.example.engine.project.KeyframeProperty.VOLUME })
+    }
+
+    @Test
+    fun `phase 7 audio effects clamping, beat marker management, and magnetic marker snapping work`() {
+        val doc0 = projectEngine.createNewDocument(
+            name = "Phase 7 Audio",
+            aspectRatio = AspectRatioPreset.LANDSCAPE_16_9,
+            fps = 30,
+            editorMode = EditorMode.ADVANCED,
+        )
+        val a1 = sampleAsset("bgm-1", MediaType.AUDIO, durationMs = 5_000L)
+        val (doc1, aClip) = timelineEngine.insertAssetAsClip(doc0, a1, atTimelineMs = 0L)
+        val clipId = aClip!!.clipId
+
+        // Update Audio FX + out-of-range clamping
+        val docFx = timelineEngine.updateClipAudioEffect(
+            doc1,
+            clipId,
+            com.example.engine.project.ClipAudioEffect(
+                preset = com.example.engine.project.AudioEffectPreset.VOCAL_CLEAR,
+                pan = -2.5f,
+                bassDb = 18.0f,
+                trebleDb = -20.0f,
+                echoMix = 1.5f,
+            ),
+        )
+        val updatedFx = docFx.tracks.flatMap { it.clips }.first { it.clipId == clipId }.audioEffect
+        assertEquals(com.example.engine.project.AudioEffectPreset.VOCAL_CLEAR, updatedFx.preset)
+        assertEquals(-1.0f, updatedFx.pan, 0.001f)
+        assertEquals(12.0f, updatedFx.bassDb, 0.001f)
+        assertEquals(-12.0f, updatedFx.trebleDb, 0.001f)
+        assertEquals(0.75f, updatedFx.echoMix, 0.001f)
+
+        // Add manual beat marker + auto-detected clip beat markers
+        val (docMarker, m1) = timelineEngine.addTimelineMarker(docFx, timeMs = 1_200L, label = "Drop")
+        val docAutoBeats = timelineEngine.addBeatMarkersFromClip(
+            document = docMarker,
+            clip = docMarker.tracks.flatMap { it.clips }.first { it.clipId == clipId },
+            assetBeatTimestampsMs = listOf(1_220L, 2_500L, 4_000L), // 1220ms dedups against 1200ms
+        )
+        assertEquals(3, docAutoBeats.markers.size)
+        assertEquals(listOf(1_200L, 2_500L, 4_000L), docAutoBeats.markers.map { it.timeMs })
+
+        // Verify snapping targets include timeline markers so moving another clip snaps cleanly to 2_500ms
+        val a2 = sampleAsset("sfx-1", MediaType.AUDIO, durationMs = 1_000L)
+        val (docExtraTrack, extraTrack) = timelineEngine.addTrack(docAutoBeats, TrackType.AUDIO)
+        val (docWithSfx, sfxClip) = timelineEngine.insertAssetAsClip(
+            docExtraTrack,
+            a2,
+            targetTrackId = extraTrack.id,
+            atTimelineMs = 0L,
+        )
+        val moveResult = timelineEngine.moveClip(
+            document = docWithSfx,
+            clipId = sfxClip!!.clipId,
+            desiredStartMs = 2_430L, // Within 160ms snap threshold of beat marker at 2_500ms
+            snappingEnabled = true,
+        )
+        assertEquals(2_500L, moveResult.snappedTargetMs)
+        assertEquals(2_500L, moveResult.document.tracks.first { it.id == extraTrack.id }.clips.first().timelineStartMs)
+
+        // Remove single marker and clear remaining markers
+        val docRemovedOne = timelineEngine.removeTimelineMarker(docWithSfx, m1.id)
+        assertEquals(2, docRemovedOne.markers.size)
+        val docCleared = timelineEngine.clearTimelineMarkers(docRemovedOne)
+        assertTrue(docCleared.markers.isEmpty())
     }
 }

@@ -206,4 +206,204 @@ class ProjectRepositoryRobolectricTest {
         assertEquals("KINETIC", reopenedText.textSpec?.text)
         assertEquals(TextStylePreset.NEON_POP, reopenedText.textSpec?.stylePreset)
     }
+
+    @Test
+    fun `phase 5 transforms blend modes masks shader effects and adjustment clips persist in Room`() = runTest {
+        val created = repository.createProject(
+            name = "Phase 5 Compositor",
+            aspectRatio = AspectRatioPreset.LANDSCAPE_16_9,
+            fps = 30,
+            editorMode = EditorMode.ADVANCED,
+        )
+        val timelineEngine = TimelineEngine()
+        val overlayImage = MediaAsset(
+            id = "asset-img-1",
+            projectId = created.id,
+            type = MediaType.IMAGE,
+            displayName = "overlay.png",
+            sourceUri = "content://media/overlay",
+            managedFilePath = "/tmp/overlay.png",
+            mimeType = "image/png",
+            durationMs = 0L,
+            width = 1080,
+            height = 1080,
+            fps = 0f,
+            bitrate = 0L,
+            fileSizeBytes = 250_000L,
+            status = MediaStatus.READY,
+            importedAt = 1_000L,
+        )
+        val overlayTrackId = created.tracks.first { it.type == TrackType.OVERLAY }.id
+        val (doc1, ovClip) = timelineEngine.insertAssetAsClip(created, overlayImage, targetTrackId = overlayTrackId)
+        val clipId = ovClip!!.clipId
+
+        val doc2 = timelineEngine.updateClipTransform(
+            doc1,
+            clipId,
+            LayerTransform(positionX = 0.25f, positionY = -0.15f, scaleX = 0.7f, scaleY = 0.7f, rotationDeg = -30f, opacity = 0.85f),
+        )
+        val doc3 = timelineEngine.updateClipBlendMode(doc2, clipId, BlendModePreset.ADD)
+        val doc4 = timelineEngine.updateClipMask(
+            doc3,
+            clipId,
+            LayerMask(shape = MaskShape.ELLIPSE, centerX = 0.4f, centerY = 0.6f, feather = 0.14f, inverted = false),
+        )
+        val doc5 = timelineEngine.updateClipShaderEffect(
+            doc4,
+            clipId,
+            ClipShaderEffect(ShaderEffectType.VHS_SCANLINES, intensity = 0.8f),
+        )
+        val (doc6, adjClip) = timelineEngine.insertAdjustmentClip(
+            document = doc5,
+            adjustments = ClipAdjustments(filterPreset = FilterPreset.COOL_SLATE, tint = -0.3f),
+            shaderEffect = ClipShaderEffect(ShaderEffectType.NONE),
+        )
+        // Use valid ShaderEffectType.GLOW for adjustment clip
+        val doc7 = timelineEngine.updateClipShaderEffect(
+            doc6,
+            adjClip!!.clipId,
+            ClipShaderEffect(ShaderEffectType.GLOW, intensity = 0.55f),
+        )
+        repository.saveDocument(doc7)
+        repository.switchEditorMode(created.id, EditorMode.QUICK)
+
+        val reopened = repository.observeProject(created.id).first()!!
+        assertEquals(EditorMode.QUICK, reopened.editorMode)
+        val reopenedOv = reopened.tracks.first { it.type == TrackType.OVERLAY }.clips.first()
+        assertEquals(0.25f, reopenedOv.transform.positionX, 0.01f)
+        assertEquals(-30f, reopenedOv.transform.rotationDeg, 0.01f)
+        assertEquals(0.85f, reopenedOv.transform.opacity, 0.01f)
+        assertEquals(BlendModePreset.ADD, reopenedOv.blendMode)
+        assertEquals(MaskShape.ELLIPSE, reopenedOv.mask.shape)
+        assertEquals(0.14f, reopenedOv.mask.feather, 0.01f)
+        assertEquals(ShaderEffectType.VHS_SCANLINES, reopenedOv.shaderEffect.type)
+
+        val reopenedAdj = reopened.tracks.first { it.type == TrackType.ADJUSTMENT }.clips.first()
+        assertEquals(ClipKind.ADJUSTMENT, reopenedAdj.clipKind)
+        assertEquals(FilterPreset.COOL_SLATE, reopenedAdj.adjustments.filterPreset)
+        assertEquals(-0.3f, reopenedAdj.adjustments.tint, 0.01f)
+        assertEquals(ShaderEffectType.GLOW, reopenedAdj.shaderEffect.type)
+    }
+
+    @Test
+    fun `phase 6 keyframes, custom bezier handles, and motion presets persist across Room reopen and mode switch`() = runTest {
+        val created = repository.createProject(
+            name = "Phase 6 Keyframes",
+            aspectRatio = AspectRatioPreset.VERTICAL_9_16,
+            fps = 30,
+            editorMode = EditorMode.ADVANCED,
+        )
+        val timelineEngine = TimelineEngine()
+        val videoAsset = MediaAsset(
+            id = "asset-kf-1",
+            projectId = created.id,
+            type = MediaType.VIDEO,
+            displayName = "kf.mp4",
+            sourceUri = "content://media/kf",
+            managedFilePath = "/tmp/kf.mp4",
+            mimeType = "video/mp4",
+            durationMs = 3_000L,
+            width = 1080,
+            height = 1920,
+            fps = 30f,
+            bitrate = 2_000_000L,
+            fileSizeBytes = 900_000L,
+            status = MediaStatus.READY,
+            importedAt = 1_000L,
+        )
+        val (doc1, vClip) = timelineEngine.insertAssetAsClip(created, videoAsset)
+        val clipId = vClip!!.clipId
+
+        val doc2 = timelineEngine.applyMotionPresetToClip(doc1, clipId, MotionPreset.SLIDE_IN)
+        val customBezier = BezierCurveSpec(0.18f, 1.42f, 0.48f, 0.96f)
+        var doc3 = timelineEngine.upsertKeyframe(
+            document = doc2,
+            clipId = clipId,
+            property = KeyframeProperty.ROTATION,
+            timeMs = 0L,
+            value = -25f,
+            interpolation = KeyframeInterpolation.CUBIC_BEZIER,
+            bezier = customBezier,
+        ).first
+        doc3 = timelineEngine.upsertKeyframe(
+            document = doc3,
+            clipId = clipId,
+            property = KeyframeProperty.ROTATION,
+            timeMs = 1_500L,
+            value = 15f,
+            interpolation = KeyframeInterpolation.EASE_OUT,
+        ).first
+
+        repository.saveDocument(doc3)
+        repository.switchEditorMode(created.id, EditorMode.QUICK)
+
+        val reopened = repository.observeProject(created.id).first()!!
+        assertEquals(EditorMode.QUICK, reopened.editorMode)
+        val reopenedClip = reopened.tracks.first { it.type == TrackType.VIDEO }.clips.first()
+        val rotTrack = reopenedClip.keyframeTracks.firstOrNull { it.property == KeyframeProperty.ROTATION }
+        assertNotNull(rotTrack)
+        assertEquals(2, rotTrack!!.keyframes.size)
+        assertEquals(KeyframeInterpolation.CUBIC_BEZIER, rotTrack.keyframes.first().interpolation)
+        assertEquals(1.42f, rotTrack.keyframes.first().bezier.y1, 0.005f)
+        assertEquals(15f, rotTrack.keyframes.last().value, 0.01f)
+    }
+
+    @Test
+    fun `phase 7 clip audio effects and timeline beat markers persist across Room reopen and mode switch`() = runTest {
+        val created = repository.createProject(
+            name = "Phase 7 Audio Mix",
+            aspectRatio = AspectRatioPreset.LANDSCAPE_16_9,
+            fps = 30,
+            editorMode = EditorMode.ADVANCED,
+        )
+        val timelineEngine = TimelineEngine()
+        val audioAsset = MediaAsset(
+            id = "asset-aud-7",
+            projectId = created.id,
+            type = MediaType.AUDIO,
+            displayName = "soundtrack.wav",
+            sourceUri = "content://media/soundtrack",
+            managedFilePath = "/tmp/soundtrack.wav",
+            mimeType = "audio/wav",
+            durationMs = 8_000L,
+            width = 0,
+            height = 0,
+            fps = 0f,
+            bitrate = 256_000L,
+            fileSizeBytes = 1_200_000L,
+            status = MediaStatus.READY,
+            importedAt = 1_000L,
+        )
+        val (doc1, aClip) = timelineEngine.insertAssetAsClip(created, audioAsset)
+        val clipId = aClip!!.clipId
+
+        val doc2 = timelineEngine.updateClipAudioEffect(
+            doc1,
+            clipId,
+            ClipAudioEffect(
+                preset = AudioEffectPreset.STUDIO_PUNCH,
+                pan = 0.45f,
+                bassDb = 5.0f,
+                trebleDb = 3.5f,
+                echoMix = 0.25f,
+            ),
+        )
+        val (doc3, _) = timelineEngine.addTimelineMarker(doc2, timeMs = 1_500L, label = "Chorus")
+        val (doc4, _) = timelineEngine.addTimelineMarker(doc3, timeMs = 3_250L, label = "Hook")
+
+        repository.saveDocument(doc4)
+        repository.switchEditorMode(created.id, EditorMode.QUICK)
+
+        val reopened = repository.observeProject(created.id).first()!!
+        assertEquals(EditorMode.QUICK, reopened.editorMode)
+        val reopenedClip = reopened.tracks.first { it.type == TrackType.AUDIO }.clips.first()
+        assertEquals(AudioEffectPreset.STUDIO_PUNCH, reopenedClip.audioEffect.preset)
+        assertEquals(0.45f, reopenedClip.audioEffect.pan, 0.01f)
+        assertEquals(5.0f, reopenedClip.audioEffect.bassDb, 0.01f)
+        assertEquals(3.5f, reopenedClip.audioEffect.trebleDb, 0.01f)
+        assertEquals(0.25f, reopenedClip.audioEffect.echoMix, 0.01f)
+        assertEquals(2, reopened.markers.size)
+        assertEquals("Chorus", reopened.markers[0].label)
+        assertEquals(3_250L, reopened.markers[1].timeMs)
+    }
 }
