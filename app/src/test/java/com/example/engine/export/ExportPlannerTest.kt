@@ -3,8 +3,10 @@ package com.example.engine.export
 import com.example.engine.effects.EffectsEngine
 import com.example.engine.project.AspectRatioPreset
 import com.example.engine.project.BlendModePreset
+import com.example.engine.project.ChromaKeySpec
 import com.example.engine.project.ClipAdjustments
 import com.example.engine.project.ClipAudioEffect
+import com.example.engine.project.ClipLutSpec
 import com.example.engine.project.ClipShaderEffect
 import com.example.engine.project.ClipTransition
 import com.example.engine.project.EditorMode
@@ -12,6 +14,7 @@ import com.example.engine.project.ExportSettingsSpec
 import com.example.engine.project.FilterPreset
 import com.example.engine.project.LayerMask
 import com.example.engine.project.LayerTransform
+import com.example.engine.project.LutPreset
 import com.example.engine.project.MaskShape
 import com.example.engine.project.MediaAsset
 import com.example.engine.project.MediaStatus
@@ -20,9 +23,12 @@ import com.example.engine.project.MotionPreset
 import com.example.engine.project.ProjectDocument
 import com.example.engine.project.ProjectEngine
 import com.example.engine.project.ShaderEffectType
+import com.example.engine.project.SpeedRampPreset
+import com.example.engine.project.StabilizationSpec
 import com.example.engine.project.TextStylePreset
 import com.example.engine.project.TrackType
 import com.example.engine.project.TransitionType
+import com.example.engine.timeline.SpeedRampEngine
 import com.example.engine.timeline.TimelineEngine
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -129,6 +135,11 @@ class ExportPlannerTest {
                 clipId,
                 ClipShaderEffect(ShaderEffectType.CHROMATIC_ABERRATION, 0.7f),
             ),
+            "Zoom Blur Shader" to timelineEngine.updateClipShaderEffect(
+                baseDoc,
+                clipId,
+                ClipShaderEffect(ShaderEffectType.ZOOM_BLUR, 0.6f),
+            ),
             "Transform" to timelineEngine.updateClipTransform(baseDoc, clipId, LayerTransform(rotationDeg = 22f)),
             "Keyframes" to timelineEngine.applyMotionPresetToClip(baseDoc, clipId, MotionPreset.BOUNCE),
             "Color Filter" to timelineEngine.updateClipAdjustments(
@@ -141,6 +152,29 @@ class ExportPlannerTest {
                 baseDoc,
                 clipId,
                 ClipAudioEffect(pan = -0.5f, bassDb = 4f),
+            ),
+            "Reverse Playback" to timelineEngine.updateClipReversed(baseDoc, clipId, isReversed = true),
+            "Speed Ramp" to timelineEngine.updateClipSpeedRamp(
+                baseDoc,
+                clipId,
+                SpeedRampPreset.MONTAGE,
+                SpeedRampEngine.presetPoints(SpeedRampPreset.MONTAGE),
+            ),
+            "Chroma Key" to timelineEngine.updateClipChromaKey(
+                baseDoc,
+                clipId,
+                ChromaKeySpec(enabled = true),
+            ),
+            "3D LUT" to timelineEngine.updateClipLut(
+                baseDoc,
+                clipId,
+                ClipLutSpec(preset = LutPreset.TEAL_ORANGE, intensity = 0.9f),
+            ),
+            "Stabilization" to timelineEngine.updateClipStabilization(
+                baseDoc,
+                clipId,
+                StabilizationSpec(enabled = true, strength = 0.75f, cropScale = 1.12f),
+                emptyList(),
             ),
         )
 

@@ -33,4 +33,5 @@ data class MediaAssetEntity(
     val fileSizeBytes: Long,
     val statusName: String,
     val importedAt: Long,
+    val proxyFilePath: String? = null,
 )

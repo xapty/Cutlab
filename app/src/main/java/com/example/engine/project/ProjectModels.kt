@@ -198,6 +198,10 @@ enum class ShaderEffectType(val label: String, val shaderId: Int) {
     VHS_SCANLINES("VHS Scan", 5),
     PIXELATE("Pixelate", 6),
     SHARPEN_EDGE("Crisp Edge", 7),
+    ZOOM_BLUR("Zoom Blur", 8),
+    FISHEYE("Lens Warp", 9),
+    HALATION("Halation", 10),
+    NEON_EDGE("Neon Edge", 11),
 }
 
 @Serializable
@@ -208,6 +212,65 @@ data class ClipShaderEffect(
     val isActive: Boolean
         get() = type != ShaderEffectType.NONE && intensity > 0.01f
 }
+
+@Serializable
+enum class SpeedRampPreset(val label: String) {
+    NONE("Uniform"),
+    MONTAGE("Montage"),
+    HERO_MOMENT("Hero"),
+    BULLET_TIME("Bullet"),
+    JUMP_CUT("Jump Cut"),
+    FLASH_IN("Flash In"),
+    FLASH_OUT("Flash Out"),
+}
+
+@Serializable
+data class SpeedPoint(
+    val normalizedTime: Float,
+    val speed: Float,
+)
+
+@Serializable
+data class ChromaKeySpec(
+    val enabled: Boolean = false,
+    val keyColorArgb: Long = 0xFF00D84AL,
+    val similarity: Float = 0.34f,
+    val smoothness: Float = 0.14f,
+    val spillSuppression: Float = 0.45f,
+)
+
+@Serializable
+enum class LutPreset(val label: String) {
+    NONE("None"),
+    TEAL_ORANGE("Teal & Orange"),
+    KODAK_2383("Kodak 2383"),
+    FUJI_PRO("Fuji Velvia"),
+    BLEACH_BYPASS("Bleach Bypass"),
+    NOIR_PUNCH("Noir Punch"),
+    GOLDEN_HOUR("Golden Hour"),
+    CYBER_MINT("Cyber Mint"),
+    CUSTOM_CUBE("Custom .cube"),
+}
+
+@Serializable
+data class ClipLutSpec(
+    val preset: LutPreset = LutPreset.NONE,
+    val intensity: Float = 0.85f,
+    val customCubePath: String? = null,
+    val customCubeName: String? = null,
+) {
+    val isActive: Boolean
+        get() = preset != LutPreset.NONE &&
+            intensity > 0.01f &&
+            (preset != LutPreset.CUSTOM_CUBE || !customCubePath.isNullOrBlank())
+}
+
+@Serializable
+data class StabilizationSpec(
+    val enabled: Boolean = false,
+    val strength: Float = 0.65f,
+    val cropScale: Float = 1.12f,
+)
 
 @Serializable
 enum class TextStylePreset(val label: String) {
@@ -377,6 +440,12 @@ data class TimelineClipRef(
     val shaderEffect: ClipShaderEffect = ClipShaderEffect(),
     val keyframeTracks: List<KeyframeTrack> = emptyList(),
     val audioEffect: ClipAudioEffect = ClipAudioEffect(),
+    val speedRampPreset: SpeedRampPreset = SpeedRampPreset.NONE,
+    val speedRampPoints: List<SpeedPoint> = emptyList(),
+    val isReversed: Boolean = false,
+    val chromaKey: ChromaKeySpec = ChromaKeySpec(),
+    val lutSpec: ClipLutSpec = ClipLutSpec(),
+    val stabilization: StabilizationSpec = StabilizationSpec(),
 )
 
 @Serializable
@@ -431,9 +500,20 @@ data class MediaAsset(
     val fileSizeBytes: Long,
     val status: MediaStatus,
     val importedAt: Long,
+    val proxyFilePath: String? = null,
 ) {
     val playbackUri: String
         get() = managedFilePath?.let { "file://$it" } ?: sourceUri
+
+    val hasReadyProxy: Boolean
+        get() = !proxyFilePath.isNullOrBlank()
+
+    fun previewUri(preferProxy: Boolean): String =
+        if (preferProxy && !proxyFilePath.isNullOrBlank()) {
+            "file://$proxyFilePath"
+        } else {
+            playbackUri
+        }
 
     val resolutionLabel: String
         get() = if (width > 0 && height > 0) "${width}×${height}" else ""

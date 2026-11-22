@@ -28,8 +28,10 @@ import com.example.engine.audio.PcmAudioExtractor
 import com.example.engine.compositor.CompositorEngine
 import com.example.engine.compositor.ResolvedVisualLayer
 import com.example.engine.effects.EffectsEngine
+import com.example.engine.effects.Lut3DEngine
 import com.example.engine.project.BlendModePreset
 import com.example.engine.project.ClipKind
+import com.example.engine.project.ClipLutSpec
 import com.example.engine.project.LayerMask
 import com.example.engine.project.MediaAsset
 import com.example.engine.project.MediaStatus
@@ -38,6 +40,7 @@ import com.example.engine.project.ProjectDocument
 import com.example.engine.project.TrackType
 import com.example.engine.project.TransitionType
 import com.example.engine.timeline.ActiveClipLayer
+import com.example.engine.timeline.SpeedRampEngine
 import com.example.engine.timeline.TimelineEngine
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -369,10 +372,11 @@ class CustomGlVideoExporter(
         val asset = layer.asset ?: return null
         if (asset.status != MediaStatus.READY) return null
         return if (asset.type == MediaType.VIDEO) {
-            val sourceMs = (
-                layer.sourceLayer.clip.sourceStartMs +
-                    (layer.sourceLayer.clipRelativeMs * layer.sourceLayer.clip.speed).toLong()
-                ).coerceAtLeast(0L)
+            val sourceMs = SpeedRampEngine.clipRelativeToSourceMs(
+                clip = layer.sourceLayer.clip,
+                clipRelativeMs = layer.sourceLayer.clipRelativeMs,
+                assetDurationMs = asset.durationMs,
+            )
             videoSampler.sampleFrame(asset, sourceMs * 1_000L, quantStepUs)
         } else {
             val cached = imageCache[asset.id]
@@ -658,6 +662,16 @@ class CustomGlVideoExporter(
         private val fboIds = IntArray(3)
         private val fboTexIds = IntArray(3)
         private val uploadTexId = IntArray(1)
+        private var dummyLutTexId = 0
+        private val lutTextureCache = object : LinkedHashMap<String, Int>(8, 0.75f, true) {
+            override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Int>?): Boolean {
+                if (size > 8 && eldest != null) {
+                    GLES20.glDeleteTextures(1, intArrayOf(eldest.value), 0)
+                    return true
+                }
+                return false
+            }
+        }
 
         private var baseFboIdx = 0
         private var scratchBaseIdx = 1
@@ -745,6 +759,20 @@ class CustomGlVideoExporter(
             GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR)
             GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE)
             GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE)
+
+            val dummyArr = IntArray(1)
+            GLES20.glGenTextures(1, dummyArr, 0)
+            dummyLutTexId = dummyArr[0]
+            if (dummyLutTexId != 0) {
+                GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, dummyLutTexId)
+                GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_NEAREST)
+                GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_NEAREST)
+                val px = Bitmap.createBitmap(1, 1, Bitmap.Config.ARGB_8888).apply {
+                    setPixel(0, 0, android.graphics.Color.BLACK)
+                }
+                GLUtils.texImage2D(GLES20.GL_TEXTURE_2D, 0, px, 0)
+                px.recycle()
+            }
         }
 
         fun beginCompositionFrame() {
@@ -810,6 +838,30 @@ class CustomGlVideoExporter(
             GLES20.glUniform1f(GLES20.glGetUniformLocation(program2d, "uTimeSec"), timeSec)
             GLES20.glUniform2f(GLES20.glGetUniformLocation(program2d, "uTexelSize"), 1f / texW, 1f / texH)
 
+            val ck = layer.effectiveChromaKey
+            val ckRed = ((ck.keyColorArgb ushr 16) and 0xFF) / 255f
+            val ckGreen = ((ck.keyColorArgb ushr 8) and 0xFF) / 255f
+            val ckBlue = (ck.keyColorArgb and 0xFF) / 255f
+            GLES20.glUniform1i(GLES20.glGetUniformLocation(program2d, "uChromaEnabled"), if (ck.enabled) 1 else 0)
+            GLES20.glUniform3f(GLES20.glGetUniformLocation(program2d, "uChromaRgb"), ckRed, ckGreen, ckBlue)
+            GLES20.glUniform1f(GLES20.glGetUniformLocation(program2d, "uChromaSimilarity"), ck.similarity)
+            GLES20.glUniform1f(GLES20.glGetUniformLocation(program2d, "uChromaSmoothness"), ck.smoothness)
+            GLES20.glUniform1f(GLES20.glGetUniformLocation(program2d, "uChromaSpill"), ck.spillSuppression)
+
+            val lutTexId = getOrLoadLutTexture(layer.effectiveLut)
+            GLES20.glActiveTexture(GLES20.GL_TEXTURE1)
+            if (lutTexId != 0 && layer.effectiveLut.isActive) {
+                GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, lutTexId)
+                GLES20.glUniform1i(GLES20.glGetUniformLocation(program2d, "uLutEnabled"), 1)
+                GLES20.glUniform1f(GLES20.glGetUniformLocation(program2d, "uLutIntensity"), layer.effectiveLut.intensity)
+            } else {
+                GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, dummyLutTexId)
+                GLES20.glUniform1i(GLES20.glGetUniformLocation(program2d, "uLutEnabled"), 0)
+                GLES20.glUniform1f(GLES20.glGetUniformLocation(program2d, "uLutIntensity"), 0f)
+            }
+            GLES20.glUniform1i(GLES20.glGetUniformLocation(program2d, "uLutTexture"), 1)
+            GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
+
             val wipeActive = layer.activeTransition?.type == TransitionType.WIPE_RIGHT && layer.transitionProgress < 1f
             val mask: LayerMask = layer.mask
             if (wipeActive) {
@@ -835,6 +887,30 @@ class CustomGlVideoExporter(
 
             GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
             blendLayerFboIntoBase(layer.blendMode.shaderId)
+        }
+
+        private fun getOrLoadLutTexture(spec: ClipLutSpec): Int {
+            if (!spec.isActive) return 0
+            val key = Lut3DEngine.cacheKey(spec)
+            lutTextureCache[key]?.let { return it }
+            val table = Lut3DEngine.resolveLutTable(spec) ?: return 0
+            val stripBmp = Lut3DEngine.packTableToGlStripBitmap(table)
+            val texIds = IntArray(1)
+            GLES20.glGenTextures(1, texIds, 0)
+            val texId = texIds[0]
+            if (texId == 0) {
+                stripBmp.recycle()
+                return 0
+            }
+            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, texId)
+            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR)
+            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR)
+            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE)
+            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE)
+            GLUtils.texImage2D(GLES20.GL_TEXTURE_2D, 0, stripBmp, 0)
+            stripBmp.recycle()
+            lutTextureCache[key] = texId
+            return texId
         }
 
         fun compositeTextLayer(
@@ -898,6 +974,12 @@ class CustomGlVideoExporter(
             GLES20.glUniform1f(GLES20.glGetUniformLocation(program2d, "uShaderIntensity"), 0f)
             GLES20.glUniform1f(GLES20.glGetUniformLocation(program2d, "uTimeSec"), 0f)
             GLES20.glUniform2f(GLES20.glGetUniformLocation(program2d, "uTexelSize"), 1f / bmp.width, 1f / bmp.height)
+            GLES20.glUniform1i(GLES20.glGetUniformLocation(program2d, "uChromaEnabled"), 0)
+            GLES20.glUniform1i(GLES20.glGetUniformLocation(program2d, "uLutEnabled"), 0)
+            GLES20.glActiveTexture(GLES20.GL_TEXTURE1)
+            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, dummyLutTexId)
+            GLES20.glUniform1i(GLES20.glGetUniformLocation(program2d, "uLutTexture"), 1)
+            GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
             GLES20.glUniform1i(GLES20.glGetUniformLocation(program2d, "uMaskShape"), 0)
 
             GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
@@ -1045,6 +1127,12 @@ class CustomGlVideoExporter(
             if (uploadTexId[0] != 0) {
                 GLES20.glDeleteTextures(1, uploadTexId, 0)
                 uploadTexId.fill(0)
+            }
+            lutTextureCache.values.forEach { GLES20.glDeleteTextures(1, intArrayOf(it), 0) }
+            lutTextureCache.clear()
+            if (dummyLutTexId != 0) {
+                GLES20.glDeleteTextures(1, intArrayOf(dummyLutTexId), 0)
+                dummyLutTexId = 0
             }
             if (fboIds[0] != 0) {
                 GLES20.glDeleteFramebuffers(3, fboIds, 0)

@@ -1,6 +1,7 @@
 package com.example.feature.project
 
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -10,6 +11,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
@@ -24,6 +26,7 @@ import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.AspectRatio
 import androidx.compose.material.icons.filled.AutoFixHigh
+import androidx.compose.material.icons.filled.Replay
 import androidx.compose.material.icons.filled.Speed
 import androidx.compose.material.icons.filled.TextFields
 import androidx.compose.material.icons.filled.Tune
@@ -40,10 +43,19 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.StrokeJoin
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -61,12 +73,15 @@ import com.example.engine.project.FilterPreset
 import com.example.engine.project.MediaAsset
 import com.example.engine.project.MediaType
 import com.example.engine.project.ProjectDocument
+import com.example.engine.project.SpeedPoint
+import com.example.engine.project.SpeedRampPreset
 import com.example.engine.project.TextAlignMode
 import com.example.engine.project.TextAnimationPreset
 import com.example.engine.project.TextOverlaySpec
 import com.example.engine.project.TextStylePreset
 import com.example.engine.project.TimelineClipRef
 import com.example.engine.project.TransitionType
+import com.example.engine.timeline.SpeedRampEngine
 import com.example.ui.theme.LocalStudioColors
 import kotlin.math.abs
 import kotlin.math.roundToLong
@@ -83,6 +98,10 @@ enum class QuickToolSheet {
     BLEND_MASK,
     SHADER_FX,
     ANIMATION,
+    CHROMA_KEY,
+    LUT_GRADE,
+    STABILIZE_TRACK,
+    PROXY_MEDIA,
 }
 
 @Composable
@@ -99,6 +118,8 @@ fun QuickToolsOverviewContent(
     onUpdateTransition: (ClipTransition?) -> Unit,
     onPreviewTransition: (ClipTransition?) -> Unit,
     onUpdateSpeed: (Float) -> Unit,
+    onUpdateSpeedRamp: (SpeedRampPreset, List<SpeedPoint>) -> Unit = { _, _ -> },
+    onToggleReverse: () -> Unit = {},
     onUpdateAudio: (Float, Boolean, Long, Long) -> Unit,
     onPreviewAudio: (Float, Boolean, Long, Long) -> Unit,
     onCommitSliderEdit: (String) -> Unit,
@@ -138,6 +159,8 @@ fun QuickToolsOverviewContent(
             SpeedToolPanel(
                 clip = selectedClip,
                 onUpdateSpeed = onUpdateSpeed,
+                onUpdateSpeedRamp = onUpdateSpeedRamp,
+                onToggleReverse = onToggleReverse,
             )
             AudioToolPanel(
                 clip = selectedClip,
@@ -620,16 +643,22 @@ fun TransitionToolPanel(
 fun SpeedToolPanel(
     clip: TimelineClipRef?,
     onUpdateSpeed: (Float) -> Unit,
+    onUpdateSpeedRamp: (SpeedRampPreset, List<SpeedPoint>) -> Unit = { _, _ -> },
+    onToggleReverse: () -> Unit = {},
 ) {
     if (clip == null) {
         EmptyStudioState(
             icon = Icons.Default.Speed,
             title = "Select a Video or Audio Clip",
-            subtitle = "Tap a clip on the timeline to change its playback speed.",
+            subtitle = "Tap a clip on the timeline to change playback speed, speed curves, or reverse direction.",
         )
         return
     }
     val presets = listOf(0.25f, 0.5f, 0.75f, 1.0f, 1.25f, 1.5f, 2.0f, 3.0f, 4.0f)
+    val effectivePoints = SpeedRampEngine.effectivePoints(clip)
+    val avgSpeed = SpeedRampEngine.averageSpeed(clip)
+    val studio = LocalStudioColors.current
+    var selectedNodeIndex by rememberSaveable(clip.clipId) { mutableIntStateOf(0) }
 
     StudioPanel(modifier = Modifier.fillMaxWidth()) {
         Column(
@@ -652,15 +681,35 @@ fun SpeedToolPanel(
                         modifier = Modifier.size(18.dp),
                     )
                     Text(
-                        text = "Playback Speed",
+                        text = "Speed, Ramps & Reverse",
                         style = MaterialTheme.typography.titleSmall,
                         color = MaterialTheme.colorScheme.onSurface,
                     )
                 }
                 Text(
-                    text = "${String.format("%.2gx", clip.speed)} • ${TimeFormatting.formatDurationLabel(clip.durationMs)}",
+                    text = "${String.format("%.2gx", avgSpeed)} • ${TimeFormatting.formatDurationLabel(clip.durationMs)}",
                     style = MaterialTheme.typography.labelMedium,
                     color = MaterialTheme.colorScheme.primary,
+                )
+            }
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                FilterChip(
+                    selected = clip.isReversed,
+                    onClick = onToggleReverse,
+                    leadingIcon = {
+                        Icon(
+                            imageVector = Icons.Default.Replay,
+                            contentDescription = null,
+                            modifier = Modifier.size(16.dp),
+                        )
+                    },
+                    label = { Text(if (clip.isReversed) "Reverse Active (REV)" else "Reverse Playback") },
+                    modifier = Modifier.testTag("speed_reverse_toggle"),
                 )
             }
 
@@ -671,7 +720,9 @@ fun SpeedToolPanel(
                 horizontalArrangement = Arrangement.spacedBy(6.dp),
             ) {
                 presets.forEach { speed ->
-                    val selected = abs(clip.speed - speed) < 0.03f
+                    val selected = clip.speedRampPreset == SpeedRampPreset.NONE &&
+                        effectivePoints.isEmpty() &&
+                        abs(clip.speed - speed) < 0.03f
                     FilterChip(
                         selected = selected,
                         onClick = { onUpdateSpeed(speed) },
@@ -679,6 +730,115 @@ fun SpeedToolPanel(
                         modifier = Modifier.testTag("speed_preset_${speed}"),
                     )
                 }
+            }
+
+            Text(
+                text = "Speed Ramp Curves",
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                SpeedRampPreset.entries.forEach { rampPreset ->
+                    FilterChip(
+                        selected = clip.speedRampPreset == rampPreset,
+                        onClick = {
+                            val pts = SpeedRampEngine.presetPoints(rampPreset)
+                            selectedNodeIndex = 1.coerceAtMost((pts.size - 1).coerceAtLeast(0))
+                            onUpdateSpeedRamp(rampPreset, pts)
+                        },
+                        label = { Text(rampPreset.label) },
+                        modifier = Modifier.testTag("speed_ramp_preset_${rampPreset.name.lowercase()}"),
+                    )
+                }
+            }
+
+            if (effectivePoints.isNotEmpty()) {
+                val curvePoints = effectivePoints
+                val primaryColor = MaterialTheme.colorScheme.primary
+                val secondaryColor = MaterialTheme.colorScheme.secondary
+                val safeNodeIdx = selectedNodeIndex.coerceIn(0, curvePoints.lastIndex)
+
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(84.dp)
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(studio.elevatedPanel)
+                        .border(1.dp, studio.hairlineBorder, RoundedCornerShape(10.dp))
+                        .padding(horizontal = 10.dp, vertical = 8.dp)
+                        .testTag("speed_ramp_curve_canvas"),
+                ) {
+                    Canvas(modifier = Modifier.fillMaxSize()) {
+                        val baselineY = size.height * (1f - ((1.0f - SpeedRampEngine.MIN_SPEED) / (SpeedRampEngine.MAX_SPEED - SpeedRampEngine.MIN_SPEED)))
+                        drawLine(
+                            color = Color.White.copy(alpha = 0.2f),
+                            start = Offset(0f, baselineY),
+                            end = Offset(size.width, baselineY),
+                            strokeWidth = 1.2f,
+                        )
+                        val path = Path()
+                        curvePoints.forEachIndexed { idx, pt ->
+                            val px = pt.normalizedTime * size.width
+                            val normSpd = ((pt.speed - SpeedRampEngine.MIN_SPEED) / (SpeedRampEngine.MAX_SPEED - SpeedRampEngine.MIN_SPEED)).coerceIn(0f, 1f)
+                            val py = size.height * (1f - normSpd)
+                            if (idx == 0) path.moveTo(px, py) else path.lineTo(px, py)
+                        }
+                        drawPath(
+                            path = path,
+                            color = primaryColor,
+                            style = Stroke(width = 2.5.dp.toPx(), cap = StrokeCap.Round, join = StrokeJoin.Round),
+                        )
+                        curvePoints.forEachIndexed { idx, pt ->
+                            val px = pt.normalizedTime * size.width
+                            val normSpd = ((pt.speed - SpeedRampEngine.MIN_SPEED) / (SpeedRampEngine.MAX_SPEED - SpeedRampEngine.MIN_SPEED)).coerceIn(0f, 1f)
+                            val py = size.height * (1f - normSpd)
+                            drawCircle(
+                                color = if (idx == safeNodeIdx) secondaryColor else primaryColor,
+                                radius = if (idx == safeNodeIdx) 5.dp.toPx() else 3.5.dp.toPx(),
+                                center = Offset(px, py),
+                            )
+                        }
+                    }
+                }
+
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    curvePoints.forEachIndexed { idx, pt ->
+                        FilterChip(
+                            selected = idx == safeNodeIdx,
+                            onClick = { selectedNodeIndex = idx },
+                            label = {
+                                Text("Pt ${idx + 1}: ${String.format("%.2gx", pt.speed)}")
+                            },
+                            modifier = Modifier.testTag("speed_ramp_node_$idx"),
+                        )
+                    }
+                }
+
+                val activePt = curvePoints[safeNodeIdx]
+                LabeledStudioSlider(
+                    label = "Node ${safeNodeIdx + 1} Speed",
+                    valueText = "${String.format("%.2gx", activePt.speed)}",
+                    value = activePt.speed,
+                    valueRange = SpeedRampEngine.MIN_SPEED..SpeedRampEngine.MAX_SPEED,
+                    onValueChange = { updatedSpd ->
+                        val updatedList = curvePoints.mapIndexed { idx, pt ->
+                            if (idx == safeNodeIdx) pt.copy(speed = updatedSpd) else pt
+                        }
+                        onUpdateSpeedRamp(clip.speedRampPreset, updatedList)
+                    },
+                    onValueChangeFinished = {},
+                )
             }
         }
     }

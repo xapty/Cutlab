@@ -4,9 +4,11 @@ import com.example.engine.animation.AnimationEngine
 import com.example.engine.effects.EffectsEngine
 import com.example.engine.project.BezierCurveSpec
 import com.example.engine.project.BlendModePreset
+import com.example.engine.project.ChromaKeySpec
 import com.example.engine.project.ClipAdjustments
 import com.example.engine.project.ClipAudioEffect
 import com.example.engine.project.ClipKind
+import com.example.engine.project.ClipLutSpec
 import com.example.engine.project.ClipShaderEffect
 import com.example.engine.project.ClipTransition
 import com.example.engine.project.FilterPreset
@@ -20,6 +22,9 @@ import com.example.engine.project.MediaType
 import com.example.engine.project.MotionPreset
 import com.example.engine.project.ProjectDocument
 import com.example.engine.project.PropertyKeyframe
+import com.example.engine.project.SpeedPoint
+import com.example.engine.project.SpeedRampPreset
+import com.example.engine.project.StabilizationSpec
 import com.example.engine.project.TextOverlaySpec
 import com.example.engine.project.TimelineClipRef
 import com.example.engine.project.TimelineMarker
@@ -497,16 +502,100 @@ class TimelineEngine(
         if (clip.clipKind != ClipKind.MEDIA || isImageClip) return document
 
         val clampedSpeed = newSpeed.coerceIn(0.25f, 4.0f)
-        if (abs(clampedSpeed - clip.speed) < 0.001f) return document
+        val hasExistingRamp = clip.speedRampPreset != SpeedRampPreset.NONE || clip.speedRampPoints.isNotEmpty()
+        if (!hasExistingRamp && abs(clampedSpeed - clip.speed) < 0.001f) return document
 
-        val currentSourceSpanMs = (clip.durationMs * clip.speed).toLong().coerceAtLeast(MIN_CLIP_DURATION_MS)
+        val currentSourceSpanMs = SpeedRampEngine.sourceSpanMs(clip).coerceAtLeast(MIN_CLIP_DURATION_MS)
         val newDurationMs = (currentSourceSpanMs / clampedSpeed).toLong()
             .coerceAtLeast(MIN_CLIP_DURATION_MS)
+        return applyUpdatedClipDuration(
+            document = document,
+            ownerTrack = ownerTrack,
+            clip = clip,
+            newDurationMs = newDurationMs,
+            nowMs = nowMs,
+        ) { target, rescaledKeyframes ->
+            target.copy(
+                speed = clampedSpeed,
+                speedRampPreset = SpeedRampPreset.NONE,
+                speedRampPoints = emptyList(),
+                durationMs = newDurationMs,
+                fadeInMs = target.fadeInMs.coerceAtMost(newDurationMs),
+                fadeOutMs = target.fadeOutMs.coerceAtMost(newDurationMs),
+                transitionIn = target.transitionIn?.let {
+                    it.copy(durationMs = it.durationMs.coerceAtMost(newDurationMs))
+                },
+                keyframeTracks = rescaledKeyframes,
+            )
+        }
+    }
+
+    fun updateClipSpeedRamp(
+        document: ProjectDocument,
+        clipId: String,
+        preset: SpeedRampPreset,
+        customPoints: List<SpeedPoint> = emptyList(),
+        isImageClip: Boolean = false,
+        nowMs: Long = System.currentTimeMillis(),
+    ): ProjectDocument {
+        val ownerTrack = document.tracks.firstOrNull { track ->
+            track.clips.any { it.clipId == clipId }
+        } ?: return document
+        if (ownerTrack.isLocked) return document
+
+        val clip = ownerTrack.clips.first { it.clipId == clipId }
+        if (clip.clipKind != ClipKind.MEDIA || isImageClip) return document
+
+        val normalizedPoints = when {
+            preset == SpeedRampPreset.NONE && customPoints.isEmpty() -> emptyList()
+            customPoints.isNotEmpty() -> SpeedRampEngine.normalizePoints(customPoints, clip.speed)
+            else -> SpeedRampEngine.normalizePoints(SpeedRampEngine.presetPoints(preset), clip.speed)
+        }
+
+        val currentSourceSpanMs = SpeedRampEngine.sourceSpanMs(clip).coerceAtLeast(MIN_CLIP_DURATION_MS)
+        val nextAvgSpeed = SpeedRampEngine.averageSpeed(normalizedPoints, clip.speed)
+        val newDurationMs = if (normalizedPoints.isEmpty()) {
+            (currentSourceSpanMs / clip.speed.coerceIn(0.25f, 4.0f)).toLong().coerceAtLeast(MIN_CLIP_DURATION_MS)
+        } else {
+            SpeedRampEngine.computeRampedDurationMs(currentSourceSpanMs, normalizedPoints, clip.speed)
+                .coerceAtLeast(MIN_CLIP_DURATION_MS)
+        }
+
+        return applyUpdatedClipDuration(
+            document = document,
+            ownerTrack = ownerTrack,
+            clip = clip,
+            newDurationMs = newDurationMs,
+            nowMs = nowMs,
+        ) { target, rescaledKeyframes ->
+            target.copy(
+                speed = if (normalizedPoints.isEmpty()) target.speed else nextAvgSpeed,
+                speedRampPreset = preset,
+                speedRampPoints = normalizedPoints,
+                durationMs = newDurationMs,
+                fadeInMs = target.fadeInMs.coerceAtMost(newDurationMs),
+                fadeOutMs = target.fadeOutMs.coerceAtMost(newDurationMs),
+                transitionIn = target.transitionIn?.let {
+                    it.copy(durationMs = it.durationMs.coerceAtMost(newDurationMs))
+                },
+                keyframeTracks = rescaledKeyframes,
+            )
+        }
+    }
+
+    private fun applyUpdatedClipDuration(
+        document: ProjectDocument,
+        ownerTrack: TimelineTrack,
+        clip: TimelineClipRef,
+        newDurationMs: Long,
+        nowMs: Long,
+        mutateClip: (TimelineClipRef, List<KeyframeTrack>) -> TimelineClipRef,
+    ): ProjectDocument {
         val durationDelta = newDurationMs - clip.durationMs
         val oldEndMs = clip.timelineStartMs + clip.durationMs
 
         val sortedClips = ownerTrack.clips.sortedBy { it.timelineStartMs }
-        val clipIndex = sortedClips.indexOfFirst { it.clipId == clipId }
+        val clipIndex = sortedClips.indexOfFirst { it.clipId == clip.clipId }
         val nextClipStart = if (clipIndex < sortedClips.lastIndex) {
             sortedClips[clipIndex + 1].timelineStartMs
         } else Long.MAX_VALUE
@@ -523,20 +612,10 @@ class TimelineEngine(
             )
         }
 
-        val updatedClip = clip.copy(
-            speed = clampedSpeed,
-            durationMs = newDurationMs,
-            fadeInMs = clip.fadeInMs.coerceAtMost(newDurationMs),
-            fadeOutMs = clip.fadeOutMs.coerceAtMost(newDurationMs),
-            transitionIn = clip.transitionIn?.let {
-                it.copy(durationMs = it.durationMs.coerceAtMost(newDurationMs))
-            },
-            keyframeTracks = rescaledKeyframes,
-        )
-
+        val updatedClip = mutateClip(clip, rescaledKeyframes)
         val updatedClips = sortedClips.map { c ->
             when {
-                c.clipId == clipId -> updatedClip
+                c.clipId == clip.clipId -> updatedClip
                 overlapShift > 0L && c.timelineStartMs >= oldEndMs -> {
                     c.copy(timelineStartMs = c.timelineStartMs + overlapShift)
                 }
@@ -549,6 +628,82 @@ class TimelineEngine(
             if (track.id == ownerTrack.id) track.copy(clips = updatedClips) else track
         }
         return document.copy(tracks = updatedTracks, updatedAt = nowMs)
+    }
+
+    fun updateClipReversed(
+        document: ProjectDocument,
+        clipId: String,
+        isReversed: Boolean,
+        isImageClip: Boolean = false,
+        nowMs: Long = System.currentTimeMillis(),
+    ): ProjectDocument = updateClipById(document, clipId, nowMs) { clip ->
+        if (clip.clipKind != ClipKind.MEDIA || isImageClip) clip
+        else clip.copy(isReversed = isReversed)
+    }
+
+    fun updateClipChromaKey(
+        document: ProjectDocument,
+        clipId: String,
+        chromaKey: ChromaKeySpec,
+        nowMs: Long = System.currentTimeMillis(),
+    ): ProjectDocument = updateClipById(document, clipId, nowMs) { clip ->
+        clip.copy(
+            chromaKey = chromaKey.copy(
+                similarity = chromaKey.similarity.coerceIn(0.05f, 0.85f),
+                smoothness = chromaKey.smoothness.coerceIn(0.01f, 0.50f),
+                spillSuppression = chromaKey.spillSuppression.coerceIn(0f, 1f),
+            ),
+        )
+    }
+
+    fun updateClipLut(
+        document: ProjectDocument,
+        clipId: String,
+        lutSpec: ClipLutSpec,
+        nowMs: Long = System.currentTimeMillis(),
+    ): ProjectDocument = updateClipById(document, clipId, nowMs) { clip ->
+        clip.copy(
+            lutSpec = lutSpec.copy(intensity = lutSpec.intensity.coerceIn(0f, 1f)),
+        )
+    }
+
+    fun updateClipStabilization(
+        document: ProjectDocument,
+        clipId: String,
+        stabilization: StabilizationSpec,
+        generatedTracks: List<KeyframeTrack> = emptyList(),
+        nowMs: Long = System.currentTimeMillis(),
+    ): ProjectDocument = updateClipById(document, clipId, nowMs) { clip ->
+        val safeSpec = stabilization.copy(
+            strength = stabilization.strength.coerceIn(0f, 1f),
+            cropScale = stabilization.cropScale.coerceIn(1f, 1.35f),
+        )
+        val mergedTracks = if (!safeSpec.enabled) {
+            val resetProps = setOf(
+                KeyframeProperty.POSITION_X,
+                KeyframeProperty.POSITION_Y,
+                KeyframeProperty.SCALE_X,
+                KeyframeProperty.SCALE_Y,
+            )
+            clip.keyframeTracks.filterNot { it.property in resetProps }
+        } else if (generatedTracks.isNotEmpty()) {
+            val replacedProps = generatedTracks.map { it.property }.toSet()
+            clip.keyframeTracks.filterNot { it.property in replacedProps } + generatedTracks
+        } else {
+            clip.keyframeTracks
+        }
+        clip.copy(stabilization = safeSpec, keyframeTracks = mergedTracks)
+    }
+
+    fun mergeKeyframeTracks(
+        document: ProjectDocument,
+        clipId: String,
+        tracks: List<KeyframeTrack>,
+        nowMs: Long = System.currentTimeMillis(),
+    ): ProjectDocument = updateClipById(document, clipId, nowMs) { clip ->
+        if (tracks.isEmpty()) return@updateClipById clip
+        val replacedProps = tracks.map { it.property }.toSet()
+        clip.copy(keyframeTracks = clip.keyframeTracks.filterNot { it.property in replacedProps } + tracks)
     }
 
     fun updateClipAudio(
@@ -955,9 +1110,43 @@ class TimelineEngine(
         val rightDuration = targetClip.durationMs - leftDuration
 
         val (leftTracks, rightTracks) = splitKeyframeTracks(targetClip, leftDuration, rightDuration)
+        val splitSourcePos = SpeedRampEngine.clipRelativeToSourceMs(
+            targetClip,
+            leftDuration,
+            targetClip.sourceTotalDurationMs,
+        )
+        val leftSourceStart = if (targetClip.isReversed) splitSourcePos else targetClip.sourceStartMs
+        val rightSourceStart = if (targetClip.isReversed) targetClip.sourceStartMs else splitSourcePos
+
+        val splitNorm = (leftDuration.toFloat() / targetClip.durationMs.coerceAtLeast(1L).toFloat())
+            .coerceIn(0.01f, 0.99f)
+        val existingRamp = SpeedRampEngine.effectivePoints(targetClip)
+        val leftRamp: List<SpeedPoint>
+        val rightRamp: List<SpeedPoint>
+        if (existingRamp.isEmpty()) {
+            leftRamp = emptyList()
+            rightRamp = emptyList()
+        } else {
+            val splitSpeed = SpeedRampEngine.evaluateSpeedAtNormalized(existingRamp, splitNorm, targetClip.speed)
+            leftRamp = SpeedRampEngine.normalizePoints(
+                existingRamp.filter { it.normalizedTime < splitNorm }
+                    .map { it.copy(normalizedTime = it.normalizedTime / splitNorm) } +
+                    SpeedPoint(1f, splitSpeed),
+                targetClip.speed,
+            )
+            rightRamp = SpeedRampEngine.normalizePoints(
+                listOf(SpeedPoint(0f, splitSpeed)) +
+                    existingRamp.filter { it.normalizedTime > splitNorm }
+                        .map { it.copy(normalizedTime = (it.normalizedTime - splitNorm) / (1f - splitNorm)) },
+                targetClip.speed,
+            )
+        }
 
         val leftClip = targetClip.copy(
+            sourceStartMs = leftSourceStart,
             durationMs = leftDuration,
+            speed = if (leftRamp.isEmpty()) targetClip.speed else SpeedRampEngine.averageSpeed(leftRamp, targetClip.speed),
+            speedRampPoints = leftRamp,
             fadeInMs = targetClip.fadeInMs.coerceAtMost(leftDuration),
             fadeOutMs = 0L,
             transitionIn = targetClip.transitionIn?.let {
@@ -969,8 +1158,10 @@ class TimelineEngine(
         val rightClip = targetClip.copy(
             clipId = rightClipId,
             timelineStartMs = splitTimelineMs,
-            sourceStartMs = targetClip.sourceStartMs + (leftDuration * targetClip.speed).toLong(),
+            sourceStartMs = rightSourceStart,
             durationMs = rightDuration,
+            speed = if (rightRamp.isEmpty()) targetClip.speed else SpeedRampEngine.averageSpeed(rightRamp, targetClip.speed),
+            speedRampPoints = rightRamp,
             fadeInMs = 0L,
             fadeOutMs = targetClip.fadeOutMs.coerceAtMost(rightDuration),
             transitionIn = null,

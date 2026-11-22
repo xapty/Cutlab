@@ -302,6 +302,21 @@ class ExportPlanner(
                         reasons += "Color grading & filters"
                     }
                 }
+                if (clip.isReversed) {
+                    reasons += "Reverse playback"
+                }
+                if (clip.speedRampPreset != com.example.engine.project.SpeedRampPreset.NONE || clip.speedRampPoints.isNotEmpty()) {
+                    reasons += "Speed ramping curve"
+                }
+                if (clip.chromaKey.enabled) {
+                    reasons += "Chroma key compositing"
+                }
+                if (clip.lutSpec.isActive) {
+                    reasons += "3D LUT grading"
+                }
+                if (clip.stabilization.enabled) {
+                    reasons += "Video stabilization"
+                }
                 if (!clip.audioEffect.isDefault || clip.fadeInMs > 0L || clip.fadeOutMs > 0L) {
                     reasons += "Audio fades & FX/EQ/Pan"
                 }

@@ -40,6 +40,8 @@ import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.AutoFixHigh
 import androidx.compose.material.icons.filled.BlurOn
 import androidx.compose.material.icons.filled.Bolt
+import androidx.compose.material.icons.filled.CenterFocusStrong
+import androidx.compose.material.icons.filled.Colorize
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.ContentCut
 import androidx.compose.material.icons.filled.CropFree
@@ -51,7 +53,9 @@ import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.Layers
 import androidx.compose.material.icons.filled.Movie
 import androidx.compose.material.icons.filled.OpenWith
+import androidx.compose.material.icons.filled.Palette
 import androidx.compose.material.icons.filled.PermMedia
+import androidx.compose.material.icons.filled.SdStorage
 import androidx.compose.material.icons.filled.Speed
 import androidx.compose.material.icons.filled.TextFields
 import androidx.compose.material.icons.filled.Tune
@@ -105,9 +109,11 @@ import com.example.core.designsystem.StudioPanel
 import com.example.engine.project.AspectRatioPreset
 import com.example.engine.project.BezierCurveSpec
 import com.example.engine.project.BlendModePreset
+import com.example.engine.project.ChromaKeySpec
 import com.example.engine.project.ClipAdjustments
 import com.example.engine.project.ClipAudioEffect
 import com.example.engine.project.ClipKind
+import com.example.engine.project.ClipLutSpec
 import com.example.engine.project.ClipShaderEffect
 import com.example.engine.project.ClipTransition
 import com.example.engine.project.EditorMode
@@ -121,6 +127,8 @@ import com.example.engine.project.MediaStatus
 import com.example.engine.project.MediaType
 import com.example.engine.project.MotionPreset
 import com.example.engine.project.ProjectDocument
+import com.example.engine.project.SpeedPoint
+import com.example.engine.project.SpeedRampPreset
 import com.example.engine.project.TextOverlaySpec
 import com.example.engine.project.TextStylePreset
 import com.example.engine.project.TimelineClipRef
@@ -160,6 +168,14 @@ fun ProjectWorkspaceScreen(
         contract = ActivityResultContracts.OpenMultipleDocuments(),
     ) { uris -> viewModel.importMedia(uris, null) }
 
+    val cubeLutPickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument(),
+    ) { uri ->
+        if (uri != null) {
+            viewModel.importCustomCubeLut(uri)
+        }
+    }
+
     LaunchedEffect(viewModel) {
         viewModel.messages.collect { message ->
             snackbarHostState.showSnackbar(message)
@@ -183,6 +199,9 @@ fun ProjectWorkspaceScreen(
     }
     val onImportFile = {
         anyFilePickerLauncher.launch(arrayOf("video/*", "image/*", "audio/*"))
+    }
+    val onImportCubeLut = {
+        cubeLutPickerLauncher.launch(arrayOf("*/*"))
     }
 
     Scaffold(
@@ -365,6 +384,7 @@ fun ProjectWorkspaceScreen(
                                 playheadMs = uiState.playheadMs,
                                 totalDurationMs = uiState.totalDurationMs,
                                 isPlaying = uiState.isPlaying,
+                                preferProxyPlayback = uiState.preferProxyPlayback,
                                 stageHeight = 148.dp,
                                 onTogglePlayPause = viewModel::togglePlayPause,
                                 onStepFrame = viewModel::stepFrame,
@@ -408,6 +428,8 @@ fun ProjectWorkspaceScreen(
                                 onUpdateTransition = viewModel::updateSelectedClipTransition,
                                 onPreviewTransition = viewModel::previewSelectedClipTransition,
                                 onUpdateSpeed = viewModel::updateSelectedClipSpeed,
+                                onUpdateSpeedRamp = viewModel::updateSelectedClipSpeedRamp,
+                                onToggleReverse = viewModel::toggleSelectedClipReverse,
                                 onUpdateAudio = viewModel::updateSelectedClipAudio,
                                 onPreviewAudio = viewModel::previewSelectedClipAudio,
                                 onUpdateAudioEffect = viewModel::updateSelectedClipAudioEffect,
@@ -426,6 +448,18 @@ fun ProjectWorkspaceScreen(
                                 onPreviewMask = viewModel::previewSelectedClipMask,
                                 onUpdateShaderEffect = viewModel::updateSelectedClipShaderEffect,
                                 onPreviewShaderEffect = viewModel::previewSelectedClipShaderEffect,
+                                onUpdateChromaKey = viewModel::updateSelectedClipChromaKey,
+                                onPreviewChromaKey = viewModel::previewSelectedClipChromaKey,
+                                onUpdateLut = viewModel::updateSelectedClipLut,
+                                onPreviewLut = viewModel::previewSelectedClipLut,
+                                onImportCubeLut = onImportCubeLut,
+                                onRunMotionTrack = viewModel::runMotionTrackingOnSelectedClip,
+                                onRunStabilization = viewModel::runStabilizationOnSelectedClip,
+                                onDisableStabilization = viewModel::disableStabilizationOnSelectedClip,
+                                onSetPreferProxyPlayback = viewModel::setPreferProxyPlayback,
+                                onGenerateProxy = viewModel::generateProxyForSelectedAsset,
+                                onCancelProxy = viewModel::cancelActiveProxyJob,
+                                onDeleteProxy = viewModel::deleteProxyForSelectedAsset,
                                 onSelectKeyframeProperty = viewModel::selectKeyframeProperty,
                                 onSelectKeyframe = viewModel::selectKeyframe,
                                 onJumpToClipRelativeTime = viewModel::jumpToClipRelativeTime,
@@ -488,6 +522,7 @@ fun ProjectWorkspaceScreen(
                             playheadMs = uiState.playheadMs,
                             totalDurationMs = uiState.totalDurationMs,
                             isPlaying = uiState.isPlaying,
+                            preferProxyPlayback = uiState.preferProxyPlayback,
                             stageHeight = 186.dp,
                             onTogglePlayPause = viewModel::togglePlayPause,
                             onStepFrame = viewModel::stepFrame,
@@ -689,6 +724,8 @@ fun ProjectWorkspaceScreen(
                     QuickToolSheet.SPEED -> SpeedToolPanel(
                         clip = uiState.selectedClip,
                         onUpdateSpeed = viewModel::updateSelectedClipSpeed,
+                        onUpdateSpeedRamp = viewModel::updateSelectedClipSpeedRamp,
+                        onToggleReverse = viewModel::toggleSelectedClipReverse,
                     )
                     QuickToolSheet.AUDIO -> AudioWorkspaceContent(
                         project = project,
@@ -733,6 +770,39 @@ fun ProjectWorkspaceScreen(
                         onUpdateShaderEffect = viewModel::updateSelectedClipShaderEffect,
                         onPreviewShaderEffect = viewModel::previewSelectedClipShaderEffect,
                         onCommitSliderEdit = viewModel::commitClipGesture,
+                    )
+                    QuickToolSheet.CHROMA_KEY -> ChromaKeyToolPanel(
+                        clip = uiState.selectedClip,
+                        selectedAsset = uiState.selectedClipAsset,
+                        onUpdateChromaKey = viewModel::updateSelectedClipChromaKey,
+                        onPreviewChromaKey = viewModel::previewSelectedClipChromaKey,
+                        onCommitSliderEdit = viewModel::commitClipGesture,
+                    )
+                    QuickToolSheet.LUT_GRADE -> LutGradingToolPanel(
+                        clip = uiState.selectedClip,
+                        selectedAsset = uiState.selectedClipAsset,
+                        onUpdateLut = viewModel::updateSelectedClipLut,
+                        onPreviewLut = viewModel::previewSelectedClipLut,
+                        onImportCubeLut = onImportCubeLut,
+                        onCommitSliderEdit = viewModel::commitClipGesture,
+                    )
+                    QuickToolSheet.STABILIZE_TRACK -> StabilizationAndTrackToolPanel(
+                        clip = uiState.selectedClip,
+                        selectedAsset = uiState.selectedClipAsset,
+                        isMotionAnalysisRunning = uiState.isMotionAnalysisRunning,
+                        lastTrackedPoints = uiState.lastMotionTrackPoints,
+                        onRunMotionTrack = viewModel::runMotionTrackingOnSelectedClip,
+                        onRunStabilization = viewModel::runStabilizationOnSelectedClip,
+                        onDisableStabilization = viewModel::disableStabilizationOnSelectedClip,
+                    )
+                    QuickToolSheet.PROXY_MEDIA -> ProxyMediaPanel(
+                        selectedAsset = uiState.selectedClipAsset,
+                        preferProxyPlayback = uiState.preferProxyPlayback,
+                        proxyJobState = uiState.proxyJobState,
+                        onSetPreferProxyPlayback = viewModel::setPreferProxyPlayback,
+                        onGenerateProxy = viewModel::generateProxyForSelectedAsset,
+                        onCancelProxy = viewModel::cancelActiveProxyJob,
+                        onDeleteProxy = viewModel::deleteProxyForSelectedAsset,
                     )
                     QuickToolSheet.ANIMATION -> AnimationOverviewContent(
                         clip = uiState.selectedClip,
@@ -847,6 +917,8 @@ private fun SideInspectorPanel(
     onUpdateTransition: (ClipTransition?) -> Unit,
     onPreviewTransition: (ClipTransition?) -> Unit,
     onUpdateSpeed: (Float) -> Unit,
+    onUpdateSpeedRamp: (SpeedRampPreset, List<SpeedPoint>) -> Unit,
+    onToggleReverse: () -> Unit,
     onUpdateAudio: (Float, Boolean, Long, Long) -> Unit,
     onPreviewAudio: (Float, Boolean, Long, Long) -> Unit,
     onUpdateAudioEffect: (ClipAudioEffect) -> Unit,
@@ -865,6 +937,18 @@ private fun SideInspectorPanel(
     onPreviewMask: (LayerMask) -> Unit,
     onUpdateShaderEffect: (ClipShaderEffect) -> Unit,
     onPreviewShaderEffect: (ClipShaderEffect) -> Unit,
+    onUpdateChromaKey: (ChromaKeySpec) -> Unit,
+    onPreviewChromaKey: (ChromaKeySpec) -> Unit,
+    onUpdateLut: (ClipLutSpec) -> Unit,
+    onPreviewLut: (ClipLutSpec) -> Unit,
+    onImportCubeLut: () -> Unit,
+    onRunMotionTrack: (Float, Float) -> Unit,
+    onRunStabilization: (Float) -> Unit,
+    onDisableStabilization: () -> Unit,
+    onSetPreferProxyPlayback: (Boolean) -> Unit,
+    onGenerateProxy: () -> Unit,
+    onCancelProxy: () -> Unit,
+    onDeleteProxy: () -> Unit,
     onSelectKeyframeProperty: (KeyframeProperty) -> Unit,
     onSelectKeyframe: (String?, Boolean) -> Unit,
     onJumpToClipRelativeTime: (Long) -> Unit,
@@ -1005,6 +1089,8 @@ private fun SideInspectorPanel(
                             onUpdateTransition = onUpdateTransition,
                             onPreviewTransition = onPreviewTransition,
                             onUpdateSpeed = onUpdateSpeed,
+                            onUpdateSpeedRamp = onUpdateSpeedRamp,
+                            onToggleReverse = onToggleReverse,
                             onUpdateAudio = onUpdateAudio,
                             onPreviewAudio = onPreviewAudio,
                             onCommitSliderEdit = onCommitSliderEdit,
@@ -1024,6 +1110,10 @@ private fun SideInspectorPanel(
                         CompositorOverviewContent(
                             selectedClip = uiState.selectedClip,
                             selectedAsset = uiState.selectedClipAsset,
+                            preferProxyPlayback = uiState.preferProxyPlayback,
+                            proxyJobState = uiState.proxyJobState,
+                            isMotionAnalysisRunning = uiState.isMotionAnalysisRunning,
+                            lastTrackedPoints = uiState.lastMotionTrackPoints,
                             onAddAdjustmentClip = onAddAdjustmentClip,
                             onUpdateTransform = onUpdateTransform,
                             onPreviewTransform = onPreviewTransform,
@@ -1035,6 +1125,18 @@ private fun SideInspectorPanel(
                             onUpdateAdjustments = onUpdateAdjustments,
                             onPreviewAdjustments = onPreviewAdjustments,
                             onApplyFilterToAll = onApplyFilterToAll,
+                            onUpdateChromaKey = onUpdateChromaKey,
+                            onPreviewChromaKey = onPreviewChromaKey,
+                            onUpdateLut = onUpdateLut,
+                            onPreviewLut = onPreviewLut,
+                            onImportCubeLut = onImportCubeLut,
+                            onRunMotionTrack = onRunMotionTrack,
+                            onRunStabilization = onRunStabilization,
+                            onDisableStabilization = onDisableStabilization,
+                            onSetPreferProxyPlayback = onSetPreferProxyPlayback,
+                            onGenerateProxy = onGenerateProxy,
+                            onCancelProxy = onCancelProxy,
+                            onDeleteProxy = onDeleteProxy,
                             onCommitSliderEdit = onCommitSliderEdit,
                         )
                     }
@@ -1323,6 +1425,53 @@ private fun PortraitBottomToolbar(
                 Icon(Icons.Default.BlurOn, contentDescription = null, modifier = Modifier.size(16.dp))
                 Spacer(Modifier.width(4.dp))
                 Text("Shader")
+            }
+
+            OutlinedButton(
+                onClick = { onOpenQuickTool(QuickToolSheet.LUT_GRADE) },
+                enabled = selectedClip != null && selectedClip.clipKind != ClipKind.TEXT,
+                modifier = Modifier
+                    .minimumInteractiveComponentSize()
+                    .testTag("toolbar_lut_button"),
+            ) {
+                Icon(Icons.Default.Palette, contentDescription = null, modifier = Modifier.size(16.dp))
+                Spacer(Modifier.width(4.dp))
+                Text("LUT")
+            }
+
+            OutlinedButton(
+                onClick = { onOpenQuickTool(QuickToolSheet.CHROMA_KEY) },
+                enabled = selectedClip != null && selectedClip.clipKind == ClipKind.MEDIA,
+                modifier = Modifier
+                    .minimumInteractiveComponentSize()
+                    .testTag("toolbar_chroma_button"),
+            ) {
+                Icon(Icons.Default.Colorize, contentDescription = null, modifier = Modifier.size(16.dp))
+                Spacer(Modifier.width(4.dp))
+                Text("Chroma")
+            }
+
+            OutlinedButton(
+                onClick = { onOpenQuickTool(QuickToolSheet.STABILIZE_TRACK) },
+                enabled = selectedClip != null && selectedClip.clipKind == ClipKind.MEDIA,
+                modifier = Modifier
+                    .minimumInteractiveComponentSize()
+                    .testTag("toolbar_track_stabilize_button"),
+            ) {
+                Icon(Icons.Default.CenterFocusStrong, contentDescription = null, modifier = Modifier.size(16.dp))
+                Spacer(Modifier.width(4.dp))
+                Text("Track/Stab")
+            }
+
+            OutlinedButton(
+                onClick = { onOpenQuickTool(QuickToolSheet.PROXY_MEDIA) },
+                modifier = Modifier
+                    .minimumInteractiveComponentSize()
+                    .testTag("toolbar_proxy_button"),
+            ) {
+                Icon(Icons.Default.SdStorage, contentDescription = null, modifier = Modifier.size(16.dp))
+                Spacer(Modifier.width(4.dp))
+                Text("Proxy")
             }
 
             OutlinedButton(

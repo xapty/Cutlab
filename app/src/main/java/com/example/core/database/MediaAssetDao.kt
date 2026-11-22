@@ -32,6 +32,12 @@ interface MediaAssetDao {
     @Query("UPDATE media_assets SET statusName = :statusName WHERE id = :assetId")
     suspend fun updateAssetStatus(assetId: String, statusName: String)
 
+    @Query("UPDATE media_assets SET proxyFilePath = :proxyPath WHERE id = :assetId")
+    suspend fun updateProxyFilePath(assetId: String, proxyPath: String?)
+
+    @Query("SELECT proxyFilePath FROM media_assets WHERE proxyFilePath IS NOT NULL")
+    suspend fun getAllProxyFilePaths(): List<String>
+
     @Query("DELETE FROM media_assets WHERE id = :assetId")
     suspend fun deleteAssetById(assetId: String)
 }

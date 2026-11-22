@@ -250,6 +250,23 @@ class ExportOutputManager(
         writeAllArtifacts(updated)
     }
 
+    suspend fun cleanStaleExports(): Int = withContext(Dispatchers.IO) {
+        val indexedPaths = readAllArtifacts().map { it.filePath }.toSet()
+        var removed = 0
+        if (exportRootDir.exists()) {
+            exportRootDir.walkTopDown()
+                .filter { it.isFile && it.extension.equals("mp4", ignoreCase = true) }
+                .forEach { file ->
+                    val isIncomplete = file.length() < 512L
+                    val unindexed = file.absolutePath !in indexedPaths
+                    if (isIncomplete && unindexed && file.delete()) {
+                        removed++
+                    }
+                }
+        }
+        removed
+    }
+
     private fun readAllArtifacts(): List<ExportedArtifact> {
         if (!indexFile.exists()) return emptyList()
         return runCatching {

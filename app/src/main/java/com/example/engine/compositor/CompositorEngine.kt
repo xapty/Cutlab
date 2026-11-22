@@ -3,7 +3,9 @@ package com.example.engine.compositor
 import com.example.engine.animation.AnimationEngine
 import com.example.engine.effects.EffectsEngine
 import com.example.engine.project.BlendModePreset
+import com.example.engine.project.ChromaKeySpec
 import com.example.engine.project.ClipAdjustments
+import com.example.engine.project.ClipLutSpec
 import com.example.engine.project.ClipShaderEffect
 import com.example.engine.project.ClipTransition
 import com.example.engine.project.LayerMask
@@ -25,6 +27,8 @@ data class ResolvedVisualLayer(
     val mask: LayerMask,
     val effectiveAdjustments: ClipAdjustments,
     val effectiveShader: ClipShaderEffect,
+    val effectiveChromaKey: ChromaKeySpec = ChromaKeySpec(),
+    val effectiveLut: ClipLutSpec = ClipLutSpec(),
     val effectiveOpacity: Float,
     val transitionProgress: Float,
     val activeTransition: ClipTransition?,
@@ -94,6 +98,7 @@ class CompositorEngine(
         val animatedAdjustments = animationEngine.evaluateAdjustments(layer.clip, relMs)
         var mergedAdjustments = EffectsEngine.resolveEffectiveAdjustments(animatedAdjustments)
         var mergedShader = animationEngine.evaluateShader(layer.clip, relMs)
+        var mergedLut = layer.clip.lutSpec
         val animatedMask = animationEngine.evaluateMask(layer.clip, relMs)
 
         // Apply every adjustment clip placed above this visual track in stack order
@@ -108,6 +113,9 @@ class CompositorEngine(
                 if (adjShader.isActive) {
                     mergedShader = adjShader
                 }
+                if (adj.clip.lutSpec.isActive) {
+                    mergedLut = adj.clip.lutSpec
+                }
             }
         }
 
@@ -121,6 +129,8 @@ class CompositorEngine(
             mask = animatedMask,
             effectiveAdjustments = mergedAdjustments,
             effectiveShader = mergedShader,
+            effectiveChromaKey = layer.clip.chromaKey,
+            effectiveLut = mergedLut,
             effectiveOpacity = baseOpacity,
             transitionProgress = layer.transitionProgress,
             activeTransition = layer.activeTransition,

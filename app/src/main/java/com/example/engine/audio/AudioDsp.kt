@@ -61,6 +61,22 @@ object AudioDsp {
     }
 
     /**
+     * Reverses an interleaved stereo PCM buffer frame-by-frame `[L, R]` for reverse playback.
+     */
+    fun reverseStereoFrames(stereoInterleaved: FloatArray): FloatArray {
+        val frameCount = stereoInterleaved.size / 2
+        if (frameCount <= 1) return stereoInterleaved
+        val out = FloatArray(stereoInterleaved.size)
+        for (i in 0 until frameCount) {
+            val revIdx = (frameCount - 1 - i) * 2
+            val dstIdx = i * 2
+            out[dstIdx] = stereoInterleaved[revIdx]
+            out[dstIdx + 1] = stereoInterleaved[revIdx + 1]
+        }
+        return out
+    }
+
+    /**
      * Applies preset + custom Bass/Treble shelf EQ, Echo delay, and equal-power Stereo Pan
      * in-place on an interleaved stereo float buffer.
      */

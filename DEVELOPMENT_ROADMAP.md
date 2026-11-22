@@ -10,5 +10,5 @@
 | Phase 6 | Animation Engine | Keyframes, cubic Bezier interpolation, Graph Editor, motion graphics presets | **Completed** |
 | Phase 7 | Audio Engine | Waveform generation & caching, multi-track PCM mixing, volume keyframes, EQ/Echo/Pan DSP, beat markers & sync | **Completed** |
 | Phase 8 | Export Engine | Dual-path export (Path A Media3 Transformer + Path B Custom GL/MediaCodec/MediaMuxer), validation, Gallery/SAF save & Share | **Completed** |
-| Phase 9 | Advanced Tools | Speed ramping, LUTs, chroma key, motion tracking, proxy workflow | Planned |
-| Phase 10 | Optimization & Release | Memory/GPU/thermal profiling, release APK verification | Planned |
+| Phase 9 | Advanced Tools | Speed ramping curves & reverse playback, 3D LUTs (.cube & cinema presets), YCbCr chroma key, Zoom Blur / Lens Warp / Halation / Neon Edge shaders, optical SAD motion tracking & stabilization, 540p proxy workflow | **Completed** |
+| Phase 10 | Optimization & Release | Memory trim coordinator, API 29+ thermal telemetry (API 28 fallback), adaptive GL preview scaling, live FPS & export/pipeline benchmark suite, crash log recovery, R8 keep rules, documentation & build verification | **Completed** |

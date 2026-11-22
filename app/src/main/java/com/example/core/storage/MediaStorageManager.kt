@@ -93,9 +93,18 @@ class MediaStorageManager(private val context: Context) {
         if (ok && dest.exists()) dest.absolutePath else null
     }
 
+    private val proxyRootDir: File
+        get() = File(context.filesDir, "cutlab_proxies").apply { mkdirs() }
+
     suspend fun deleteFile(path: String?) = withContext(Dispatchers.IO) {
         if (path.isNullOrBlank()) return@withContext
         runCatching { File(path).delete() }
+    }
+
+    suspend fun deleteFiles(paths: List<String>) = withContext(Dispatchers.IO) {
+        paths.forEach { path ->
+            if (path.isNotBlank()) runCatching { File(path).delete() }
+        }
     }
 
     suspend fun deleteProjectDirectory(projectId: String) = withContext(Dispatchers.IO) {
@@ -106,18 +115,34 @@ class MediaStorageManager(private val context: Context) {
     }
 
     suspend fun calculateManagedStorageBytes(): Long = withContext(Dispatchers.IO) {
-        if (!mediaRootDir.exists()) return@withContext 0L
-        mediaRootDir.walkTopDown().filter { it.isFile }.sumOf { it.length() }
+        val mediaBytes = if (mediaRootDir.exists()) {
+            mediaRootDir.walkTopDown().filter { it.isFile }.sumOf { it.length() }
+        } else 0L
+        val proxyBytes = if (proxyRootDir.exists()) {
+            proxyRootDir.walkTopDown().filter { it.isFile }.sumOf { it.length() }
+        } else 0L
+        mediaBytes + proxyBytes
     }
 
-    suspend fun pruneOrphanedFiles(referencedPaths: Set<String>): Int = withContext(Dispatchers.IO) {
-        if (!mediaRootDir.exists()) return@withContext 0
+    suspend fun pruneOrphanedFiles(
+        referencedPaths: Set<String>,
+        referencedProxyPaths: Set<String> = emptySet(),
+    ): Int = withContext(Dispatchers.IO) {
         var deletedCount = 0
-        mediaRootDir.walkTopDown()
-            .filter { it.isFile && it.absolutePath !in referencedPaths }
-            .forEach { file ->
-                if (file.delete()) deletedCount++
-            }
+        if (mediaRootDir.exists()) {
+            mediaRootDir.walkTopDown()
+                .filter { it.isFile && it.absolutePath !in referencedPaths }
+                .forEach { file ->
+                    if (file.delete()) deletedCount++
+                }
+        }
+        if (proxyRootDir.exists()) {
+            proxyRootDir.walkTopDown()
+                .filter { it.isFile && it.absolutePath !in referencedProxyPaths }
+                .forEach { file ->
+                    if (file.delete()) deletedCount++
+                }
+        }
         deletedCount
     }
 

@@ -228,6 +228,8 @@ fun CutLabApp(
                         factory = SettingsViewModel.factory(
                             preferencesRepository = appContainer.preferencesRepository,
                             projectRepository = appContainer.projectRepository,
+                            performanceMonitor = appContainer.performanceMonitor,
+                            exportCoordinator = appContainer.exportCoordinator,
                         ),
                     )
                     SettingsScreen(viewModel = vm)
@@ -246,6 +248,8 @@ fun CutLabApp(
                             exportPlanner = appContainer.exportPlanner,
                             exportOutputManager = appContainer.exportOutputManager,
                             exportCoordinator = appContainer.exportCoordinator,
+                            proxyMediaManager = appContainer.proxyMediaManager,
+                            appContext = appContainer.applicationContext,
                         ),
                     )
                     ProjectWorkspaceScreen(

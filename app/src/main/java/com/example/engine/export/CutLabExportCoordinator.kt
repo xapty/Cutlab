@@ -9,6 +9,8 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 
+import com.example.core.performance.DevicePerformanceMonitor
+
 /**
  * Orchestrates CutLab's dual-path MP4 export workflow:
  * - Path A (Media3 Transformer) for sequential timelines without unsupported effects
@@ -21,6 +23,7 @@ class CutLabExportCoordinator(
     private val outputManager: ExportOutputManager,
     private val media3Exporter: Media3TransformerExporter,
     private val customGlExporter: CustomGlVideoExporter,
+    private val performanceMonitor: DevicePerformanceMonitor? = null,
 ) {
     private val _jobState = MutableStateFlow<ExportJobState>(ExportJobState.Idle)
     val jobState: StateFlow<ExportJobState> = _jobState.asStateFlow()
@@ -134,6 +137,17 @@ class CutLabExportCoordinator(
                     validation = validation,
                 )
                 onArtifactRecorded?.invoke(artifact)
+                val totalElapsedMs = (System.currentTimeMillis() - startedAtMs).coerceAtLeast(1L)
+                performanceMonitor?.recordExportBenchmark(
+                    label = "${request.project.name} (${artifact.width}x${artifact.height})",
+                    durationMs = totalElapsedMs,
+                    outputBytes = artifact.fileSizeBytes,
+                    width = artifact.width,
+                    height = artifact.height,
+                    fps = artifact.fps,
+                    renderPath = artifact.renderPathUsed,
+                    validated = validation.isValid,
+                )
                 _jobState.value = ExportJobState.Succeeded(
                     artifact = artifact,
                     validation = validation,

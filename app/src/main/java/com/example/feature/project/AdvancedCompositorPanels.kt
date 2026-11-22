@@ -33,9 +33,13 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
 import com.example.core.designsystem.EmptyStudioState
 import com.example.core.designsystem.StudioPanel
+import com.example.core.media.ProxyJobState
+import com.example.engine.animation.TrackedMotionPoint
 import com.example.engine.project.BlendModePreset
+import com.example.engine.project.ChromaKeySpec
 import com.example.engine.project.ClipAdjustments
 import com.example.engine.project.ClipKind
+import com.example.engine.project.ClipLutSpec
 import com.example.engine.project.ClipShaderEffect
 import com.example.engine.project.LayerMask
 import com.example.engine.project.LayerTransform
@@ -51,6 +55,10 @@ import kotlin.math.roundToInt
 fun CompositorOverviewContent(
     selectedClip: TimelineClipRef?,
     selectedAsset: MediaAsset?,
+    preferProxyPlayback: Boolean = true,
+    proxyJobState: ProxyJobState = ProxyJobState.Idle,
+    isMotionAnalysisRunning: Boolean = false,
+    lastTrackedPoints: List<TrackedMotionPoint> = emptyList(),
     onAddAdjustmentClip: () -> Unit,
     onUpdateTransform: (LayerTransform) -> Unit,
     onPreviewTransform: (LayerTransform) -> Unit,
@@ -62,6 +70,18 @@ fun CompositorOverviewContent(
     onUpdateAdjustments: (ClipAdjustments) -> Unit,
     onPreviewAdjustments: (ClipAdjustments) -> Unit,
     onApplyFilterToAll: () -> Unit,
+    onUpdateChromaKey: (ChromaKeySpec) -> Unit = {},
+    onPreviewChromaKey: (ChromaKeySpec) -> Unit = {},
+    onUpdateLut: (ClipLutSpec) -> Unit = {},
+    onPreviewLut: (ClipLutSpec) -> Unit = {},
+    onImportCubeLut: () -> Unit = {},
+    onRunMotionTrack: (Float, Float) -> Unit = { _, _ -> },
+    onRunStabilization: (Float) -> Unit = {},
+    onDisableStabilization: () -> Unit = {},
+    onSetPreferProxyPlayback: (Boolean) -> Unit = {},
+    onGenerateProxy: () -> Unit = {},
+    onCancelProxy: () -> Unit = {},
+    onDeleteProxy: () -> Unit = {},
     onCommitSliderEdit: (String) -> Unit,
 ) {
     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -77,6 +97,14 @@ fun CompositorOverviewContent(
                 onPreviewAdjustments = onPreviewAdjustments,
                 onCommitSliderEdit = onCommitSliderEdit,
                 onApplyFilterToAll = onApplyFilterToAll,
+            )
+            LutGradingToolPanel(
+                clip = selectedClip,
+                selectedAsset = selectedAsset,
+                onUpdateLut = onUpdateLut,
+                onPreviewLut = onPreviewLut,
+                onImportCubeLut = onImportCubeLut,
+                onCommitSliderEdit = onCommitSliderEdit,
             )
             ShaderToolPanel(
                 clip = selectedClip,
@@ -99,20 +127,56 @@ fun CompositorOverviewContent(
                 onCommitSliderEdit = onCommitSliderEdit,
             )
             if (selectedClip.clipKind == ClipKind.MEDIA) {
+                ChromaKeyToolPanel(
+                    clip = selectedClip,
+                    selectedAsset = selectedAsset,
+                    onUpdateChromaKey = onUpdateChromaKey,
+                    onPreviewChromaKey = onPreviewChromaKey,
+                    onCommitSliderEdit = onCommitSliderEdit,
+                )
+                LutGradingToolPanel(
+                    clip = selectedClip,
+                    selectedAsset = selectedAsset,
+                    onUpdateLut = onUpdateLut,
+                    onPreviewLut = onPreviewLut,
+                    onImportCubeLut = onImportCubeLut,
+                    onCommitSliderEdit = onCommitSliderEdit,
+                )
                 ShaderToolPanel(
                     clip = selectedClip,
                     onUpdateShaderEffect = onUpdateShaderEffect,
                     onPreviewShaderEffect = onPreviewShaderEffect,
                     onCommitSliderEdit = onCommitSliderEdit,
                 )
+                if (selectedAsset?.type == MediaType.VIDEO) {
+                    StabilizationAndTrackToolPanel(
+                        clip = selectedClip,
+                        selectedAsset = selectedAsset,
+                        isMotionAnalysisRunning = isMotionAnalysisRunning,
+                        lastTrackedPoints = lastTrackedPoints,
+                        onRunMotionTrack = onRunMotionTrack,
+                        onRunStabilization = onRunStabilization,
+                        onDisableStabilization = onDisableStabilization,
+                    )
+                }
             }
         } else {
             EmptyStudioState(
                 icon = Icons.Default.Layers,
                 title = "Select a Visual, Text, or Adj Clip",
-                subtitle = "Select a visual or text clip to edit transform, blend mode, mask, or GLSL shaders, or add an Adjustment Layer above.",
+                subtitle = "Select a visual or text clip to edit transform, blend mode, mask, LUTs, chroma key, or GLSL shaders, or add an Adjustment Layer above.",
             )
         }
+
+        ProxyMediaPanel(
+            selectedAsset = selectedAsset,
+            preferProxyPlayback = preferProxyPlayback,
+            proxyJobState = proxyJobState,
+            onSetPreferProxyPlayback = onSetPreferProxyPlayback,
+            onGenerateProxy = onGenerateProxy,
+            onCancelProxy = onCancelProxy,
+            onDeleteProxy = onDeleteProxy,
+        )
     }
 }
 

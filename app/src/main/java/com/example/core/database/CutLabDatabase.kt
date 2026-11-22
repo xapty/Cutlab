@@ -5,9 +5,12 @@ import androidx.room.Database
 import androidx.room.Room
 import androidx.room.RoomDatabase
 
+import androidx.room.migration.Migration
+import androidx.sqlite.db.SupportSQLiteDatabase
+
 @Database(
     entities = [ProjectEntity::class, MediaAssetEntity::class],
-    version = 1,
+    version = 2,
     exportSchema = false,
 )
 abstract class CutLabDatabase : RoomDatabase() {
@@ -15,6 +18,12 @@ abstract class CutLabDatabase : RoomDatabase() {
     abstract fun mediaAssetDao(): MediaAssetDao
 
     companion object {
+        val MIGRATION_1_2 = object : Migration(1, 2) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE media_assets ADD COLUMN proxyFilePath TEXT")
+            }
+        }
+
         @Volatile
         private var instance: CutLabDatabase? = null
 
@@ -24,7 +33,10 @@ abstract class CutLabDatabase : RoomDatabase() {
                     context.applicationContext,
                     CutLabDatabase::class.java,
                     "cutlab_studio.db",
-                ).build().also { instance = it }
+                )
+                    .addMigrations(MIGRATION_1_2)
+                    .build()
+                    .also { instance = it }
             }
         }
     }

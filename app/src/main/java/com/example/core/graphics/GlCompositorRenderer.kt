@@ -22,7 +22,9 @@ import android.view.TextureView
 import com.example.engine.compositor.ResolvedCompositionFrame
 import com.example.engine.compositor.ResolvedVisualLayer
 import com.example.engine.effects.EffectsEngine
+import com.example.engine.effects.Lut3DEngine
 import com.example.engine.project.BlendModePreset
+import com.example.engine.project.ClipLutSpec
 import com.example.engine.project.MediaAsset
 import com.example.engine.project.MediaType
 import com.example.engine.project.TransitionType
@@ -35,8 +37,13 @@ import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.sin
 
+import android.content.ComponentCallbacks2
+import com.example.core.performance.DevicePerformanceMonitor
+import kotlin.math.roundToInt
+
 class GlCompositorRenderer(
     private val context: Context,
+    private val onFrameRendered: ((frameMs: Float) -> Unit)? = null,
     private val onVideoSurfacesReady: (primarySurface: Surface?, secondarySurface: Surface?) -> Unit,
 ) : TextureView.SurfaceTextureListener {
 
@@ -76,6 +83,17 @@ class GlCompositorRenderer(
         }
     }
 
+    private val lutTextureCache = object : LinkedHashMap<String, Int>(8, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Int>?): Boolean {
+            if (size > 8 && eldest != null) {
+                GLES20.glDeleteTextures(1, intArrayOf(eldest.value), 0)
+                return true
+            }
+            return false
+        }
+    }
+    private var dummyLutTexId = 0
+
     private data class CachedGlTexture(val texId: Int, val width: Int, val height: Int)
 
     private var latestFrame: ResolvedCompositionFrame? = null
@@ -85,6 +103,8 @@ class GlCompositorRenderer(
     private var reportedSecondaryRatio = 16f / 9f
 
     private val renderScheduled = AtomicBoolean(false)
+    @Volatile
+    private var previewResolutionScale: Float = 1.0f
     private var released = false
 
     private val quadVertices: FloatBuffer = ByteBuffer.allocateDirect(16 * 4)
@@ -120,6 +140,53 @@ class GlCompositorRenderer(
         reportedPrimaryRatio = primaryVideoRatio
         reportedSecondaryRatio = secondaryVideoRatio
         requestRender()
+    }
+
+    fun setPreviewResolutionScale(scale: Float) {
+        val clamped = scale.coerceIn(0.4f, 1.0f)
+        if (abs(previewResolutionScale - clamped) < 0.02f) return
+        previewResolutionScale = clamped
+        val handler = glHandler ?: return
+        if (released || eglDisplay == EGL14.EGL_NO_DISPLAY || eglSurface == EGL14.EGL_NO_SURFACE) return
+        handler.post {
+            if (!released && eglDisplay != EGL14.EGL_NO_DISPLAY && eglSurface != EGL14.EGL_NO_SURFACE) {
+                if (EGL14.eglMakeCurrent(eglDisplay, eglSurface, eglSurface, eglContext)) {
+                    createOrResizeFbos(surfaceWidth, surfaceHeight)
+                    drawFrameInternal()
+                }
+            }
+        }
+    }
+
+    fun trimMemory(level: Int) {
+        val handler = glHandler ?: return
+        if (released || eglDisplay == EGL14.EGL_NO_DISPLAY) return
+        handler.post {
+            if (released || eglDisplay == EGL14.EGL_NO_DISPLAY) return@post
+            if (eglSurface != EGL14.EGL_NO_SURFACE) {
+                EGL14.eglMakeCurrent(eglDisplay, eglSurface, eglSurface, eglContext)
+            }
+            if (level >= ComponentCallbacks2.TRIM_MEMORY_MODERATE ||
+                level == ComponentCallbacks2.TRIM_MEMORY_UI_HIDDEN
+            ) {
+                imageTextureCache.values.forEach { cached ->
+                    GLES20.glDeleteTextures(1, intArrayOf(cached.texId), 0)
+                }
+                imageTextureCache.clear()
+                lutTextureCache.values.forEach { texId ->
+                    GLES20.glDeleteTextures(1, intArrayOf(texId), 0)
+                }
+                lutTextureCache.clear()
+            } else {
+                while (imageTextureCache.size > 3) {
+                    val eldestKey = imageTextureCache.keys.firstOrNull() ?: break
+                    val removed = imageTextureCache.remove(eldestKey)
+                    if (removed != null) {
+                        GLES20.glDeleteTextures(1, intArrayOf(removed.texId), 0)
+                    }
+                }
+            }
+        }
     }
 
     fun requestRender() {
@@ -224,12 +291,30 @@ class GlCompositorRenderer(
             videoSurfaceTextures[i] = st
             videoSurfaces[i] = Surface(st)
         }
+
+        val dummyArr = IntArray(1)
+        GLES20.glGenTextures(1, dummyArr, 0)
+        dummyLutTexId = dummyArr[0]
+        if (dummyLutTexId != 0) {
+            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, dummyLutTexId)
+            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_NEAREST)
+            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_NEAREST)
+            val px = Bitmap.createBitmap(1, 1, Bitmap.Config.ARGB_8888).apply {
+                setPixel(0, 0, android.graphics.Color.BLACK)
+            }
+            GLUtils.texImage2D(GLES20.GL_TEXTURE_2D, 0, px, 0)
+            px.recycle()
+        }
+
         onVideoSurfacesReady(videoSurfaces[0], videoSurfaces[1])
     }
 
     private fun createOrResizeFbos(width: Int, height: Int) {
-        val targetW = width.coerceIn(64, 1080)
-        val targetH = height.coerceIn(64, 1080)
+        val maxDim = DevicePerformanceMonitor.previewMaxFboDimension(previewResolutionScale)
+        val scaledW = (width.toFloat() * previewResolutionScale).roundToInt()
+        val scaledH = (height.toFloat() * previewResolutionScale).roundToInt()
+        val targetW = scaledW.coerceIn(64, maxDim)
+        val targetH = scaledH.coerceIn(64, maxDim)
         if (targetW == fboWidth && targetH == fboHeight && fboIds[0] != 0) return
 
         deleteFbos()
@@ -270,6 +355,7 @@ class GlCompositorRenderer(
     private fun drawFrameInternal() {
         if (released || eglDisplay == EGL14.EGL_NO_DISPLAY || eglSurface == EGL14.EGL_NO_SURFACE) return
         if (!EGL14.eglMakeCurrent(eglDisplay, eglSurface, eglSurface, eglContext)) return
+        val frameStartNs = System.nanoTime()
 
         for (i in 0..1) {
             if (videoFrameDirty[i]) {
@@ -351,6 +437,8 @@ class GlCompositorRenderer(
         GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
 
         EGL14.eglSwapBuffers(eglDisplay, eglSurface)
+        val elapsedMs = (System.nanoTime() - frameStartNs) / 1_000_000f
+        onFrameRendered?.invoke(elapsedMs)
     }
 
     private fun computeTransitionValues(layer: ResolvedVisualLayer): Pair<Float, Float> {
@@ -459,6 +547,32 @@ class GlCompositorRenderer(
             1f / texH.coerceAtLeast(1),
         )
 
+        // Chroma Key (Phase 9)
+        val ck = layer.effectiveChromaKey
+        val ckRed = ((ck.keyColorArgb ushr 16) and 0xFF) / 255f
+        val ckGreen = ((ck.keyColorArgb ushr 8) and 0xFF) / 255f
+        val ckBlue = (ck.keyColorArgb and 0xFF) / 255f
+        GLES20.glUniform1i(GLES20.glGetUniformLocation(program, "uChromaEnabled"), if (ck.enabled) 1 else 0)
+        GLES20.glUniform3f(GLES20.glGetUniformLocation(program, "uChromaRgb"), ckRed, ckGreen, ckBlue)
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(program, "uChromaSimilarity"), ck.similarity)
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(program, "uChromaSmoothness"), ck.smoothness)
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(program, "uChromaSpill"), ck.spillSuppression)
+
+        // 3D LUT 2D-Strip (Phase 9)
+        val lutTexId = getOrLoadLutTexture(layer.effectiveLut)
+        GLES20.glActiveTexture(GLES20.GL_TEXTURE1)
+        if (lutTexId != 0 && layer.effectiveLut.isActive) {
+            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, lutTexId)
+            GLES20.glUniform1i(GLES20.glGetUniformLocation(program, "uLutEnabled"), 1)
+            GLES20.glUniform1f(GLES20.glGetUniformLocation(program, "uLutIntensity"), layer.effectiveLut.intensity)
+        } else {
+            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, dummyLutTexId)
+            GLES20.glUniform1i(GLES20.glGetUniformLocation(program, "uLutEnabled"), 0)
+            GLES20.glUniform1f(GLES20.glGetUniformLocation(program, "uLutIntensity"), 0f)
+        }
+        GLES20.glUniform1i(GLES20.glGetUniformLocation(program, "uLutTexture"), 1)
+        GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
+
         // SDF Mask (apply WIPE_RIGHT transition if active & no user mask overrides)
         val mask = layer.mask
         val wipeActive = layer.activeTransition?.type == TransitionType.WIPE_RIGHT && layer.transitionProgress < 1f
@@ -486,6 +600,30 @@ class GlCompositorRenderer(
 
         GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
         return true
+    }
+
+    private fun getOrLoadLutTexture(spec: ClipLutSpec): Int {
+        if (!spec.isActive) return 0
+        val key = Lut3DEngine.cacheKey(spec)
+        lutTextureCache[key]?.let { return it }
+        val table = Lut3DEngine.resolveLutTable(spec) ?: return 0
+        val stripBmp = Lut3DEngine.packTableToGlStripBitmap(table)
+        val texIds = IntArray(1)
+        GLES20.glGenTextures(1, texIds, 0)
+        val texId = texIds[0]
+        if (texId == 0) {
+            stripBmp.recycle()
+            return 0
+        }
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, texId)
+        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR)
+        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR)
+        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE)
+        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE)
+        GLUtils.texImage2D(GLES20.GL_TEXTURE_2D, 0, stripBmp, 0)
+        stripBmp.recycle()
+        lutTextureCache[key] = texId
+        return texId
     }
 
     private fun buildLayerMvpMatrix(
@@ -579,7 +717,8 @@ class GlCompositorRenderer(
         val key = asset.playbackUri
         imageTextureCache[key]?.let { return it }
 
-        val bitmap = decodeSampledBitmap(asset, maxDimension = 1080) ?: return null
+        val decodeCap = DevicePerformanceMonitor.previewMaxFboDimension(previewResolutionScale)
+        val bitmap = decodeSampledBitmap(asset, maxDimension = decodeCap) ?: return null
         val texIds = IntArray(1)
         GLES20.glGenTextures(1, texIds, 0)
         val texId = texIds[0]
@@ -693,6 +832,14 @@ class GlCompositorRenderer(
             GLES20.glDeleteTextures(1, intArrayOf(cached.texId), 0)
         }
         imageTextureCache.clear()
+        lutTextureCache.values.forEach { texId ->
+            GLES20.glDeleteTextures(1, intArrayOf(texId), 0)
+        }
+        lutTextureCache.clear()
+        if (dummyLutTexId != 0) {
+            GLES20.glDeleteTextures(1, intArrayOf(dummyLutTexId), 0)
+            dummyLutTexId = 0
+        }
         deleteFbos()
 
         listOf(program2d, programOes, programBlend, programBlit).forEach {

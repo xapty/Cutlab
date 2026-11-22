@@ -1,12 +1,17 @@
 package com.example.feature.project
 
+import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import com.example.core.database.CutLabPreferencesRepository
+import com.example.core.media.ProxyJobState
+import com.example.core.media.ProxyMediaManager
 import com.example.engine.animation.AnimationEngine
+import com.example.engine.animation.MotionTrackingEngine
+import com.example.engine.animation.TrackedMotionPoint
 import com.example.engine.audio.DecodedPcmBuffer
 import com.example.engine.audio.MasterAudioMixState
 import com.example.engine.audio.MixedAudioPreviewPlayer
@@ -14,6 +19,7 @@ import com.example.engine.audio.MultiTrackAudioMixer
 import com.example.engine.audio.PcmAudioExtractor
 import com.example.engine.audio.WaveformEnvelope
 import com.example.engine.effects.EffectsEngine
+import com.example.engine.effects.Lut3DEngine
 import com.example.engine.export.CutLabExportCoordinator
 import com.example.engine.export.ExportJobState
 import com.example.engine.export.ExportOutputManager
@@ -24,15 +30,17 @@ import com.example.engine.export.ExportRequest
 import com.example.engine.export.ExportedArtifact
 import com.example.engine.export.HardwareExportCapabilities
 import com.example.engine.project.AspectRatioPreset
-import com.example.engine.project.ExportSettingsSpec
 import com.example.engine.project.BezierCurveSpec
 import com.example.engine.project.BlendModePreset
+import com.example.engine.project.ChromaKeySpec
 import com.example.engine.project.ClipAdjustments
 import com.example.engine.project.ClipAudioEffect
 import com.example.engine.project.ClipKind
+import com.example.engine.project.ClipLutSpec
 import com.example.engine.project.ClipShaderEffect
 import com.example.engine.project.ClipTransition
 import com.example.engine.project.EditorMode
+import com.example.engine.project.ExportSettingsSpec
 import com.example.engine.project.KeyframeInterpolation
 import com.example.engine.project.KeyframeProperty
 import com.example.engine.project.LayerMask
@@ -43,12 +51,16 @@ import com.example.engine.project.MediaType
 import com.example.engine.project.MotionPreset
 import com.example.engine.project.ProjectDocument
 import com.example.engine.project.ProjectRepository
+import com.example.engine.project.SpeedPoint
+import com.example.engine.project.SpeedRampPreset
+import com.example.engine.project.StabilizationSpec
 import com.example.engine.project.TextOverlaySpec
 import com.example.engine.project.TextStylePreset
 import com.example.engine.project.TimelineClipRef
 import com.example.engine.project.TimelineTrack
 import com.example.engine.project.TrackType
 import com.example.engine.timeline.ActiveTimelineFrame
+import com.example.engine.timeline.SpeedRampEngine
 import com.example.engine.timeline.TimelineCommandHistory
 import com.example.engine.timeline.TimelineEngine
 import kotlinx.coroutines.Dispatchers
@@ -129,6 +141,10 @@ data class ProjectWorkspaceUiState(
     val exportPlan: ExportPlan? = null,
     val exportJobState: ExportJobState = ExportJobState.Idle,
     val projectExports: List<ExportedArtifact> = emptyList(),
+    val preferProxyPlayback: Boolean = true,
+    val proxyJobState: ProxyJobState = ProxyJobState.Idle,
+    val isMotionAnalysisRunning: Boolean = false,
+    val lastMotionTrackPoints: List<TrackedMotionPoint> = emptyList(),
     val isLoading: Boolean = true,
 )
 
@@ -144,6 +160,8 @@ class ProjectWorkspaceViewModel(
     private val exportPlanner: ExportPlanner = ExportPlanner(),
     private val exportOutputManager: ExportOutputManager? = null,
     private val exportCoordinator: CutLabExportCoordinator? = null,
+    private val proxyMediaManager: ProxyMediaManager? = null,
+    private val appContext: Context? = null,
 ) : ViewModel() {
 
     private val playheadMs = MutableStateFlow(0L)
@@ -164,7 +182,10 @@ class ProjectWorkspaceViewModel(
     private val preferredExportPath = MutableStateFlow(ExportRenderPath.AUTO)
     private val projectExports = MutableStateFlow<List<ExportedArtifact>>(emptyList())
     private val fallbackExportJobState = MutableStateFlow<ExportJobState>(ExportJobState.Idle)
+    private val fallbackProxyJobState = MutableStateFlow<ProxyJobState>(ProxyJobState.Idle)
     private val hardwareCapabilitiesState = MutableStateFlow(HardwareExportCapabilities())
+    private val isMotionAnalysisRunning = MutableStateFlow(false)
+    private val lastMotionTrackPoints = MutableStateFlow<List<TrackedMotionPoint>>(emptyList())
 
     private val draftDocument = MutableStateFlow<ProjectDocument?>(null)
     private var gestureStartDocument: ProjectDocument? = null
@@ -268,13 +289,23 @@ class ProjectWorkspaceViewModel(
         listOf(path, caps, job, history)
     }
 
+    private val phase9AuxState = combine(
+        preferencesRepository.preferencesFlow,
+        proxyMediaManager?.state ?: fallbackProxyJobState,
+        isMotionAnalysisRunning,
+        lastMotionTrackPoints,
+    ) { prefs, proxyState, trackingBusy, trackPoints ->
+        listOf(prefs.preferProxyPlayback, proxyState, trackingBusy, trackPoints)
+    }
+
     @Suppress("UNCHECKED_CAST")
     private val audioAndExportState = combine(
         waveformsByAssetId,
         isAuditioningMix,
         exportUiState,
-    ) { waveforms, auditioning, exportList ->
-        listOf(waveforms, auditioning, exportList)
+        phase9AuxState,
+    ) { waveforms, auditioning, exportList, p9 ->
+        listOf(waveforms, auditioning, exportList, p9)
     }
 
     @Suppress("UNCHECKED_CAST")
@@ -288,10 +319,15 @@ class ProjectWorkspaceViewModel(
         val wfMap = extraList[0] as Map<String, WaveformEnvelope>
         val auditioning = extraList[1] as Boolean
         val exportItems = extraList[2] as List<Any?>
+        val p9Items = extraList[3] as List<Any?>
         val prefPath = exportItems[0] as ExportRenderPath
         val hwCaps = exportItems[1] as HardwareExportCapabilities
         val jobState = exportItems[2] as ExportJobState
         val exportHistory = exportItems[3] as List<ExportedArtifact>
+        val preferProxy = p9Items[0] as Boolean
+        val proxyState = p9Items[1] as ProxyJobState
+        val motionBusy = p9Items[2] as Boolean
+        val motionPoints = p9Items[3] as List<TrackedMotionPoint>
 
         val doc = draft ?: persistedDoc
         val assetsById = assets.associateBy { it.id }
@@ -374,6 +410,10 @@ class ProjectWorkspaceViewModel(
             exportPlan = exportPlan,
             exportJobState = jobState,
             projectExports = exportHistory,
+            preferProxyPlayback = preferProxy,
+            proxyJobState = proxyState,
+            isMotionAnalysisRunning = motionBusy,
+            lastMotionTrackPoints = motionPoints,
             isLoading = false,
         )
     }.stateIn(
@@ -1233,8 +1273,11 @@ class ProjectWorkspaceViewModel(
                     val overlapDur = overlapEnd - overlapStart
                     if (overlapDur <= 0L) continue
                     val relStart = overlapStart - clip.timelineStartMs
-                    val srcStart = (clip.sourceStartMs + (relStart * clip.speed).toLong()).coerceAtLeast(0L)
-                    val srcDur = (overlapDur * clip.speed).toLong().coerceAtLeast(100L)
+                    val relEnd = overlapEnd - clip.timelineStartMs
+                    val sA = SpeedRampEngine.clipRelativeToSourceMs(clip, relStart, asset.durationMs)
+                    val sB = SpeedRampEngine.clipRelativeToSourceMs(clip, relEnd, asset.durationMs)
+                    val srcStart = min(sA, sB).coerceAtLeast(0L)
+                    val srcDur = abs(sB - sA).coerceAtLeast(100L)
                     val key = "${clip.assetId}:$srcStart:$srcDur"
                     if (!decodedCache.containsKey(key)) {
                         decodedCache[key] = extractor.decodePcmSegment(asset, srcStart, srcDur)
@@ -1433,6 +1476,211 @@ class ProjectWorkspaceViewModel(
         }
     }
 
+    // --- Phase 9: Advanced Video Tools & Proxies ---
+
+    fun setPreferProxyPlayback(enabled: Boolean) {
+        viewModelScope.launch {
+            preferencesRepository.setPreferProxyPlayback(enabled)
+        }
+    }
+
+    fun updateSelectedClipSpeedRamp(preset: SpeedRampPreset, customPoints: List<SpeedPoint> = emptyList()) {
+        val doc = uiState.value.project ?: return
+        val clip = uiState.value.selectedClip ?: return
+        val asset = uiState.value.selectedClipAsset
+        val isImage = asset?.type == MediaType.IMAGE
+        if (isImage) {
+            viewModelScope.launch { _messages.emit("Speed ramping applies to video and audio clips") }
+            return
+        }
+        val updated = timelineEngine.updateClipSpeedRamp(doc, clip.clipId, preset, customPoints, isImageClip = false)
+        commitDocumentEdit("Speed Ramp (${preset.label})", doc, updated)
+    }
+
+    fun toggleSelectedClipReverse() {
+        val doc = uiState.value.project ?: return
+        val clip = uiState.value.selectedClip ?: return
+        val asset = uiState.value.selectedClipAsset
+        if (asset?.type == MediaType.IMAGE) {
+            viewModelScope.launch { _messages.emit("Reverse playback applies to video & audio clips") }
+            return
+        }
+        val nextReversed = !clip.isReversed
+        val updated = timelineEngine.updateClipReversed(doc, clip.clipId, nextReversed, isImageClip = false)
+        commitDocumentEdit(if (nextReversed) "Reverse Clip" else "Forward Clip", doc, updated)
+        viewModelScope.launch {
+            _messages.emit(if (nextReversed) "Reverse playback enabled" else "Normal forward playback restored")
+        }
+    }
+
+    fun previewSelectedClipChromaKey(spec: ChromaKeySpec) {
+        val clip = uiState.value.selectedClip ?: return
+        val base = ensureGestureBaseDocument() ?: return
+        draftDocument.value = timelineEngine.updateClipChromaKey(base, clip.clipId, spec)
+    }
+
+    fun updateSelectedClipChromaKey(spec: ChromaKeySpec) {
+        val doc = uiState.value.project ?: return
+        val clip = uiState.value.selectedClip ?: return
+        val updated = timelineEngine.updateClipChromaKey(doc, clip.clipId, spec)
+        commitDocumentEdit("Chroma Key", doc, updated)
+    }
+
+    fun previewSelectedClipLut(spec: ClipLutSpec) {
+        val clip = uiState.value.selectedClip ?: return
+        val base = ensureGestureBaseDocument() ?: return
+        draftDocument.value = timelineEngine.updateClipLut(base, clip.clipId, spec)
+    }
+
+    fun updateSelectedClipLut(spec: ClipLutSpec) {
+        val doc = uiState.value.project ?: return
+        val clip = uiState.value.selectedClip ?: return
+        val updated = timelineEngine.updateClipLut(doc, clip.clipId, spec)
+        commitDocumentEdit("3D LUT (${spec.preset.label})", doc, updated)
+    }
+
+    fun importCustomCubeLut(uri: Uri) {
+        val ctx = appContext ?: run {
+            viewModelScope.launch { _messages.emit("Context unavailable for LUT import") }
+            return
+        }
+        val clip = uiState.value.selectedClip ?: return
+        viewModelScope.launch {
+            val result = Lut3DEngine.importCubeFile(ctx, uri)
+            result.onSuccess { (path, name) ->
+                val latestDoc = uiState.value.project ?: return@onSuccess
+                val updated = timelineEngine.updateClipLut(
+                    latestDoc,
+                    clip.clipId,
+                    ClipLutSpec(
+                        preset = com.example.engine.project.LutPreset.CUSTOM_CUBE,
+                        intensity = 0.85f,
+                        customCubePath = path,
+                        customCubeName = name,
+                    ),
+                )
+                commitDocumentEdit("Import .cube LUT ($name)", latestDoc, updated)
+                _messages.emit("Loaded 3D LUT: $name")
+            }.onFailure { err ->
+                _messages.emit(err.message ?: "Failed parsing .cube LUT file")
+            }
+        }
+    }
+
+    fun runMotionTrackingOnSelectedClip(roiNormX: Float, roiNormY: Float) {
+        val ctx = appContext
+        val clip = uiState.value.selectedClip
+        val asset = uiState.value.selectedClipAsset
+        if (ctx == null || clip == null || asset == null || asset.type != MediaType.VIDEO) {
+            viewModelScope.launch { _messages.emit("Select a video clip to run optical motion tracking") }
+            return
+        }
+        if (isMotionAnalysisRunning.value) return
+        viewModelScope.launch {
+            isMotionAnalysisRunning.value = true
+            try {
+                val analysis = MotionTrackingEngine.analyzeTrackTarget(
+                    context = ctx,
+                    asset = asset,
+                    clip = clip,
+                    startNormX = roiNormX,
+                    startNormY = roiNormY,
+                )
+                if (analysis.keyframeTracks.isEmpty()) {
+                    _messages.emit("Unable to sample video frames for motion tracking")
+                } else {
+                    lastMotionTrackPoints.value = analysis.points
+                    val doc = uiState.value.project ?: return@launch
+                    val updated = timelineEngine.mergeKeyframeTracks(doc, clip.clipId, analysis.keyframeTracks)
+                    commitDocumentEdit("Optical Motion Track", doc, updated)
+                    _messages.emit("Tracked ${analysis.points.size} keyframes onto Position X/Y")
+                }
+            } finally {
+                isMotionAnalysisRunning.value = false
+            }
+        }
+    }
+
+    fun runStabilizationOnSelectedClip(strength: Float) {
+        val ctx = appContext
+        val clip = uiState.value.selectedClip
+        val asset = uiState.value.selectedClipAsset
+        if (ctx == null || clip == null || asset == null || asset.type != MediaType.VIDEO) {
+            viewModelScope.launch { _messages.emit("Select a video clip to run video stabilization") }
+            return
+        }
+        if (isMotionAnalysisRunning.value) return
+        viewModelScope.launch {
+            isMotionAnalysisRunning.value = true
+            try {
+                val analysis = MotionTrackingEngine.analyzeStabilization(
+                    context = ctx,
+                    asset = asset,
+                    clip = clip,
+                    strength = strength,
+                )
+                if (analysis.keyframeTracks.isEmpty()) {
+                    _messages.emit("Unable to sample video frames for stabilization")
+                } else {
+                    val doc = uiState.value.project ?: return@launch
+                    val spec = StabilizationSpec(
+                        enabled = true,
+                        strength = strength,
+                        cropScale = analysis.cropScale,
+                    )
+                    val updated = timelineEngine.updateClipStabilization(
+                        document = doc,
+                        clipId = clip.clipId,
+                        stabilization = spec,
+                        generatedTracks = analysis.keyframeTracks,
+                    )
+                    commitDocumentEdit("Stabilize Clip", doc, updated)
+                    _messages.emit(
+                        "Stabilized (${(strength * 100).toInt()}%, auto-crop ${String.format("%.2fx", analysis.cropScale)})",
+                    )
+                }
+            } finally {
+                isMotionAnalysisRunning.value = false
+            }
+        }
+    }
+
+    fun disableStabilizationOnSelectedClip() {
+        val doc = uiState.value.project ?: return
+        val clip = uiState.value.selectedClip ?: return
+        val updated = timelineEngine.updateClipStabilization(
+            document = doc,
+            clipId = clip.clipId,
+            stabilization = StabilizationSpec(enabled = false, strength = clip.stabilization.strength, cropScale = 1f),
+            generatedTracks = emptyList(),
+        )
+        commitDocumentEdit("Remove Stabilization", doc, updated)
+        viewModelScope.launch { _messages.emit("Stabilization transforms cleared") }
+    }
+
+    fun generateProxyForSelectedAsset() {
+        val asset = uiState.value.selectedClipAsset
+        val mgr = proxyMediaManager
+        if (asset == null || mgr == null) {
+            viewModelScope.launch { _messages.emit("Select a video clip first to generate a 540p proxy") }
+            return
+        }
+        mgr.generateProxyForAsset(asset)
+    }
+
+    fun cancelActiveProxyJob() {
+        proxyMediaManager?.cancelActiveProxyJob()
+    }
+
+    fun deleteProxyForSelectedAsset() {
+        val asset = uiState.value.selectedClipAsset ?: return
+        val mgr = proxyMediaManager ?: return
+        viewModelScope.launch {
+            mgr.deleteProxyForAsset(asset)
+            _messages.emit("Deleted 540p proxy (original preserved)")
+        }
+    }
+
     override fun onCleared() {
         playbackJob?.cancel()
         stopPcmAudition()
@@ -1449,6 +1697,8 @@ class ProjectWorkspaceViewModel(
             exportPlanner: ExportPlanner = ExportPlanner(),
             exportOutputManager: ExportOutputManager? = null,
             exportCoordinator: CutLabExportCoordinator? = null,
+            proxyMediaManager: ProxyMediaManager? = null,
+            appContext: Context? = null,
         ): ViewModelProvider.Factory = object : ViewModelProvider.Factory {
             @Suppress("UNCHECKED_CAST")
             override fun <T : ViewModel> create(modelClass: Class<T>): T {
@@ -1461,6 +1711,8 @@ class ProjectWorkspaceViewModel(
                     exportPlanner = exportPlanner,
                     exportOutputManager = exportOutputManager,
                     exportCoordinator = exportCoordinator,
+                    proxyMediaManager = proxyMediaManager,
+                    appContext = appContext,
                 ) as T
             }
         }

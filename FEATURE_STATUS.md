@@ -1,13 +1,13 @@
 # CutLab Feature Status
 
-## Implemented (Phases 1 – 8)
-- **Platform Compatibility**: Configured for **Android 9 Pie (API 28)** minimum SDK through Android 16 (API 36).
+## Implemented (Phases 1 – 10)
+- **Platform Compatibility**: Configured for **Android 9 Pie (API 28)** minimum SDK through Android 16 (API 36), `applicationId = com.aistudio.cutlab.vdfqkm`, `versionCode = 2`, `versionName = "2.0"`.
 - **Project Management**: Create, open, rename, duplicate, switch Quick/Advanced mode without data loss, delete, search, filter by mode and aspect ratio.
-- **Persistent Schema**: Versioned `ProjectDocument` (`schemaVersion = 1`) stored in Room alongside indexed `MediaAssetEntity` rows and DataStore studio defaults.
+- **Persistent Schema**: Versioned `ProjectDocument` (`schemaVersion = 1`) stored in Room (`CutLabDatabase` v2 with `MIGRATION_1_2`) alongside indexed `MediaAssetEntity` rows and DataStore studio defaults (`CutLabPreferencesRepository`).
 - **Media Import (Zero-Permission)**:
   - Video & Photo import via Android Photo Picker (`PickMultipleVisualMedia`).
-  - Audio & general media import via Storage Access Framework (`OpenMultipleDocuments`).
-  - Streaming copy to app-managed storage so imported Photo Picker assets persist across app restarts.
+  - Audio, `.cube` LUT, & general media import via Storage Access Framework (`OpenMultipleDocuments` / `OpenDocument`).
+  - Streaming copy to app-private storage so imported Photo Picker assets persist across app restarts.
   - Real metadata extraction (`MediaMetadataRetriever` + `BitmapFactory` bounds) with graceful rejection of corrupted/unsupported files.
 - **Adaptive Editor Workspace (Phase 2)**:
   - Portrait layout (preview monitor, interactive multi-track timeline, contextual bottom toolbar, Media Bin, Quick Tools & Inspector sheets) and Landscape layout (preview monitor + tabbed side inspector + expanded multi-track timeline) preserving state across orientation changes.
@@ -43,6 +43,20 @@
   - **Dual-Path Hybrid Export Planner & Coordinator**: Smart planning (`ExportPlanner`) inspects hardware encoder limits (`MediaCodecList`) and active timeline composition features to dispatch sequentially compatible timelines to **Path A (`Media3TransformerExporter`)** and automatically route multi-track overlays, text layers, adjustment layers, transitions, blend modes, masks, shaders, keyframes, color grading, or mixed/DSP audio to **Path B (`CustomGlVideoExporter`)** without silently omitting edits.
   - **Custom GL + Hardware Codec Path B**: Full offscreen EGL14 + GLES 2.0 + GLSL frame compositor (reusing `CompositorShaders`, `CompositorEngine`, `AnimationEngine`, and offscreen ARGB `TextLayerBitmapRenderer`), `EGLExt.eglPresentationTimeANDROID` surface encoding to H.264/H.265 `MediaCodec`, synchronized `MultiTrackAudioMixer` -> AAC encoding, and `MediaMuxer` container writing.
   - **Export Options, Validation & Delivery**: Configurable `720p`/`1080p`/`1440p`/`4K`, `24`/`25`/`30`/`50`/`60 FPS`, `H.264`/`H.265`, and `128`–`320 kbps` AAC audio; live progress and cancellation; automatic `MediaExtractor` + `MediaMetadataRetriever` MP4 validation; zero-permission Save to Gallery (`MediaStore` `IS_PENDING` on API 29+ / SAF `CreateDocument` on API 28); and `FileProvider` Share Intent + per-project export history.
+- **Advanced Tools & Proxy Workflow (Phase 9)**:
+  - **Speed Ramping & Reverse Playback**: Piecewise-linear speed curve presets (`Montage`, `Hero`, `Bullet`, `Jump Cut`, `Flash In`, `Flash Out`) plus interactive speed curve node customization, drift-free piecewise integral source-time mapping (`SpeedRampEngine`), and reverse video & PCM audio traversal across preview, timeline splitting, audio mixing, and Path B export.
+  - **3D LUT Color Grading & Adobe `.cube` Import**: 7 procedural cinema LUTs (`Teal & Orange`, `Kodak 2383`, `Fuji Velvia`, `Bleach Bypass`, `Noir Punch`, `Golden Hour`, `Cyber Mint`) and validated SAF `.cube` file importer (`Lut3DEngine`), packed into `256×16` RGBA 2D-strip textures (`GL_TEXTURE1`) with GLSL trilinear interpolation supporting video, photo, and cascading adjustment layers.
+  - **Real-Time YCbCr Chroma Key**: GPU chrominance distance + edge smoothness + green/color spill suppression shader (`applyChromaKey`) evaluated in both live GL preview and Path B export.
+  - **Expanded GLSL Shader Library**: Added `Zoom Blur`, `Lens Warp (Fisheye)`, `Halation`, and `Neon Edge` GPU fragment shaders (`ShaderEffectType`).
+  - **Optical Motion Tracking & Camera Stabilization**: Downsampled frame SAD block-matching with parabolic sub-pixel refinement (`MotionTrackingEngine`) writing tracked `Position X/Y` keyframes, plus 3×3 median-consensus Gaussian trajectory smoothing with automatic overscan crop scaling (`StabilizationSpec`).
+  - **540p Proxy Media Workflow**: Media3 Transformer 540p H.264 proxy transcoding (`ProxyMediaManager`), Room schema v2 `proxy_file_path` persistence (`MIGRATION_1_2`), and DataStore `preferProxyPlayback` switch for low-latency preview scrubbing while exports always read full-resolution originals.
+- **Optimization, Telemetry & Release Hardening (Phase 10)**:
+  - **Thermal & Memory Trim Coordinator (`DevicePerformanceMonitor`)**: Observes OS thermal status (`PowerManager` on API 29+, `NOMINAL` fallback on API 28) and `Application.onTrimMemory` / `onLowMemory` callbacks to release Coil image caches, in-memory PCM waveform caches, and GL texture/LUT caches (`GlCompositorRenderer.trimMemory`).
+  - **Adaptive Preview Resolution**: Automatically scales preview FBO and sampled image decode dimensions (`100%` / `75%` / `50%`) based on thermal throttling, JVM heap headroom, or manual quality mode (`Auto`, `Full`, `Balanced`, `Draft`) while keeping exports at full resolution.
+  - **Live GL Frame Timing & Pipeline/Export Benchmarking**: Tracks real GL preview frame time/FPS, records validated MP4 export throughput (`CutLabExportCoordinator`), and runs an interactive multi-stage on-device CPU/LUT/Optical-Flow/DSP benchmark persisted across sessions (`cutlab_benchmarks.json`).
+  - **Crash Safety & Startup Hygiene**: Records uncaught exception summaries (`cutlab_last_crash.txt` surfaced cleanly in Settings Diagnostics), cleans stale incomplete MP4 leftovers on startup (`ExportOutputManager.cleanStaleExports`), and bundles R8 keep rules in `app/proguard-rules.pro` (`v1.0.0`).
 
-## Planned (Phases 9+)
-- Advanced tools (speed ramping, LUTs, chroma key, motion tracking, proxy workflow) and release optimization (Phases 9–10).
+## Future Enhancements Beyond Initial v1.0 Release
+- Multi-module Gradle split (`:core:*`, `:engine:*`, `:feature:*`) if project team size expands.
+- Nested sub-compositions & ML Kit / on-device neural background segmentation (deferred from core v1.0 release scope to keep APK compact and offline-fast).
+- Freeform Bezier vector pen masks (currently supports Rectangle/Rounded-Rect, Ellipse, and Linear Split SDF masks).

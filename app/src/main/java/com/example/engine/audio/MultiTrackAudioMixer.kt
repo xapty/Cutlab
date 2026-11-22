@@ -9,6 +9,8 @@ import com.example.engine.project.TimelineClipRef
 import com.example.engine.project.TimelineTrack
 import com.example.engine.project.TrackType
 import com.example.engine.timeline.ActiveTimelineFrame
+import com.example.engine.timeline.SpeedRampEngine
+import kotlin.math.abs
 import kotlin.math.cos
 import kotlin.math.max
 import kotlin.math.min
@@ -56,8 +58,18 @@ class MultiTrackAudioMixer(
             if (overlapDurationMs <= 0L) continue
 
             val relStartMs = overlapStartMs - clip.timelineStartMs
-            val sourceStart = (clip.sourceStartMs + (relStartMs * clip.speed).toLong()).coerceAtLeast(0L)
-            val sourceDur = (overlapDurationMs * clip.speed).toLong().coerceAtLeast(1L)
+            val relEndMs = overlapEndMs - clip.timelineStartMs
+            val srcA = SpeedRampEngine.clipRelativeToSourceMs(clip, relStartMs, clip.sourceTotalDurationMs)
+            val srcB = SpeedRampEngine.clipRelativeToSourceMs(clip, relEndMs, clip.sourceTotalDurationMs)
+            val sourceStart = min(srcA, srcB).coerceAtLeast(0L)
+            val sourceDur = abs(srcB - srcA).coerceAtLeast(1L)
+            val hasRamp = SpeedRampEngine.effectivePoints(clip).isNotEmpty()
+            val effectiveWindowSpeed = if (!hasRamp) {
+                clip.speed.coerceIn(SpeedRampEngine.MIN_SPEED, SpeedRampEngine.MAX_SPEED)
+            } else {
+                (sourceDur.toFloat() / overlapDurationMs.toFloat().coerceAtLeast(1f))
+                    .coerceIn(SpeedRampEngine.MIN_SPEED, SpeedRampEngine.MAX_SPEED)
+            }
 
             val rawPcm = pcmProvider(clip.assetId, sourceStart, sourceDur) ?: continue
             val stereoResampled = AudioDsp.resampleToStereoInterleaved(
@@ -65,10 +77,15 @@ class MultiTrackAudioMixer(
                 srcRate = rawPcm.sampleRateHz,
                 srcChannels = rawPcm.channelCount,
                 dstRate = targetSampleRate,
-                speed = clip.speed,
+                speed = effectiveWindowSpeed,
             )
+            val orientedStereo = if (clip.isReversed) {
+                AudioDsp.reverseStereoFrames(stereoResampled)
+            } else {
+                stereoResampled
+            }
             val processed = AudioDsp.applyClipAudioDsp(
-                stereoInterleaved = stereoResampled,
+                stereoInterleaved = orientedStereo,
                 sampleRate = targetSampleRate,
                 effect = clip.audioEffect,
             )
@@ -150,7 +167,11 @@ class MultiTrackAudioMixer(
             val level = if (hasAudio && layer != null) {
                 val wf = waveformsByAssetId[asset!!.id]
                 val rawPeak = if (wf != null && wf.peaks.isNotEmpty() && wf.durationMs > 0L) {
-                    val srcPos = layer.clip.sourceStartMs + (layer.clipRelativeMs * layer.clip.speed).toLong()
+                    val srcPos = SpeedRampEngine.clipRelativeToSourceMs(
+                        layer.clip,
+                        layer.clipRelativeMs,
+                        asset.durationMs,
+                    )
                     val bin = ((srcPos.toFloat() / wf.durationMs.toFloat()) * (wf.peaks.size - 1))
                         .toInt().coerceIn(0, wf.peaks.lastIndex)
                     wf.peaks[bin]

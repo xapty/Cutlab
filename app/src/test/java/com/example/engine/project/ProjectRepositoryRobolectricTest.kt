@@ -474,4 +474,106 @@ class ProjectRepositoryRobolectricTest {
         outputManager.deleteArtifact(artifact.id)
         assertEquals(0, outputManager.listProjectExports(created.id).size)
     }
+
+    @Test
+    fun `phase 9 speed ramps, reverse, chroma key, 3d luts, stabilization, and 540p proxy paths persist across Room reopen`() = runTest {
+        val created = repository.createProject(
+            name = "Phase 9 Pro VFX",
+            aspectRatio = AspectRatioPreset.LANDSCAPE_16_9,
+            fps = 30,
+            editorMode = EditorMode.ADVANCED,
+        )
+        val timelineEngine = TimelineEngine()
+        val tempOrig = java.io.File(context.filesDir, "vfx_orig_test.mp4").apply { writeBytes(ByteArray(32)) }
+        val tempProxy = java.io.File(context.filesDir, "vfx_540p_test.mp4").apply { writeBytes(ByteArray(16)) }
+        val videoAsset = MediaAsset(
+            id = "asset-p9-1",
+            projectId = created.id,
+            type = MediaType.VIDEO,
+            displayName = "vfx.mp4",
+            sourceUri = "content://media/vfx",
+            managedFilePath = tempOrig.absolutePath,
+            mimeType = "video/mp4",
+            durationMs = 5_000L,
+            width = 1920,
+            height = 1080,
+            fps = 30f,
+            bitrate = 8_000_000L,
+            fileSizeBytes = 4_000_000L,
+            status = MediaStatus.READY,
+            importedAt = 1_000L,
+        )
+        database.mediaAssetDao().insertAsset(
+            com.example.core.database.MediaAssetEntity(
+                id = videoAsset.id,
+                projectId = created.id,
+                mediaTypeName = videoAsset.type.name,
+                displayName = videoAsset.displayName,
+                sourceUri = videoAsset.sourceUri,
+                managedFilePath = videoAsset.managedFilePath,
+                mimeType = videoAsset.mimeType,
+                durationMs = videoAsset.durationMs,
+                width = videoAsset.width,
+                height = videoAsset.height,
+                fps = videoAsset.fps,
+                bitrate = videoAsset.bitrate,
+                fileSizeBytes = videoAsset.fileSizeBytes,
+                statusName = videoAsset.status.name,
+                importedAt = videoAsset.importedAt,
+            ),
+        )
+
+        repository.updateAssetProxyPath(videoAsset.id, tempProxy.absolutePath)
+        val reloadedAssets = repository.observeProjectAssets(created.id).first()
+        val proxyAsset = reloadedAssets.first { it.id == videoAsset.id }
+        assertEquals(true, proxyAsset.hasReadyProxy)
+        assertEquals("file://${tempProxy.absolutePath}", proxyAsset.previewUri(preferProxy = true))
+        assertEquals("file://${tempOrig.absolutePath}", proxyAsset.previewUri(preferProxy = false))
+        assertEquals("file://${tempOrig.absolutePath}", proxyAsset.playbackUri)
+        tempOrig.delete()
+        tempProxy.delete()
+
+        val (doc1, vClip) = timelineEngine.insertAssetAsClip(created, videoAsset)
+        val clipId = vClip!!.clipId
+        val rampPts = com.example.engine.timeline.SpeedRampEngine.presetPoints(SpeedRampPreset.MONTAGE)
+        val doc2 = timelineEngine.updateClipSpeedRamp(doc1, clipId, SpeedRampPreset.MONTAGE, rampPts)
+        val doc3 = timelineEngine.updateClipReversed(doc2, clipId, isReversed = true)
+        val doc4 = timelineEngine.updateClipChromaKey(
+            doc3,
+            clipId,
+            ChromaKeySpec(enabled = true, keyColorArgb = 0xFF0055FFL, similarity = 0.42f, smoothness = 0.18f, spillSuppression = 0.6f),
+        )
+        val doc5 = timelineEngine.updateClipLut(
+            doc4,
+            clipId,
+            ClipLutSpec(preset = LutPreset.KODAK_2383, intensity = 0.92f),
+        )
+        val doc6 = timelineEngine.updateClipShaderEffect(
+            doc5,
+            clipId,
+            ClipShaderEffect(ShaderEffectType.HALATION, intensity = 0.65f),
+        )
+        val doc7 = timelineEngine.updateClipStabilization(
+            doc6,
+            clipId,
+            StabilizationSpec(enabled = true, strength = 0.8f, cropScale = 1.14f),
+            emptyList(),
+        )
+        repository.saveDocument(doc7)
+        repository.switchEditorMode(created.id, EditorMode.QUICK)
+
+        val reopened = repository.observeProject(created.id).first()!!
+        val reopenedClip = reopened.tracks.first { it.type == TrackType.VIDEO }.clips.first()
+        assertEquals(SpeedRampPreset.MONTAGE, reopenedClip.speedRampPreset)
+        assertEquals(rampPts.size, reopenedClip.speedRampPoints.size)
+        assertEquals(true, reopenedClip.isReversed)
+        assertEquals(true, reopenedClip.chromaKey.enabled)
+        assertEquals(0xFF0055FFL, reopenedClip.chromaKey.keyColorArgb)
+        assertEquals(0.42f, reopenedClip.chromaKey.similarity, 0.01f)
+        assertEquals(LutPreset.KODAK_2383, reopenedClip.lutSpec.preset)
+        assertEquals(0.92f, reopenedClip.lutSpec.intensity, 0.01f)
+        assertEquals(ShaderEffectType.HALATION, reopenedClip.shaderEffect.type)
+        assertEquals(true, reopenedClip.stabilization.enabled)
+        assertEquals(1.14f, reopenedClip.stabilization.cropScale, 0.01f)
+    }
 }

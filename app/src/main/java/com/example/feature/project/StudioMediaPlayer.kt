@@ -78,6 +78,7 @@ import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.media3.common.MediaItem
 import androidx.media3.common.PlaybackParameters
 import androidx.media3.common.Player
@@ -102,6 +103,7 @@ import com.example.engine.project.TextOverlaySpec
 import com.example.engine.project.TextStylePreset
 import com.example.engine.timeline.ActiveClipLayer
 import com.example.engine.timeline.ActiveTimelineFrame
+import com.example.engine.timeline.SpeedRampEngine
 import com.example.ui.theme.InterFontFamily
 import com.example.ui.theme.JetBrainsMonoFontFamily
 import com.example.ui.theme.LocalStudioColors
@@ -119,6 +121,7 @@ fun TimelinePreviewMonitor(
     playheadMs: Long,
     totalDurationMs: Long,
     isPlaying: Boolean,
+    preferProxyPlayback: Boolean = true,
     stageHeight: Dp = 188.dp,
     onTogglePlayPause: () -> Unit,
     onStepFrame: (Int) -> Unit,
@@ -182,14 +185,39 @@ fun TimelinePreviewMonitor(
     var attachedPrimarySurface by remember { mutableStateOf<Surface?>(null) }
     var attachedSecondarySurface by remember { mutableStateOf<Surface?>(null) }
 
-    val glRenderer = remember(context) {
-        GlCompositorRenderer(context) { s0, s1 ->
-            mainHandler.post {
-                attachedPrimarySurface = s0
-                attachedSecondarySurface = s1
-                primaryVideoPlayer.setVideoSurface(s0)
-                secondaryVideoPlayer.setVideoSurface(s1)
-            }
+    val perfMonitor = remember(context) {
+        (context.applicationContext as? com.example.CutLabApplication)?.container?.performanceMonitor
+    }
+
+    val glRenderer = remember(context, perfMonitor) {
+        GlCompositorRenderer(
+            context = context,
+            onFrameRendered = { frameMs ->
+                perfMonitor?.recordPreviewFrameLatency(frameMs)
+            },
+            onVideoSurfacesReady = { s0, s1 ->
+                mainHandler.post {
+                    attachedPrimarySurface = s0
+                    attachedSecondarySurface = s1
+                    primaryVideoPlayer.setVideoSurface(s0)
+                    secondaryVideoPlayer.setVideoSurface(s1)
+                }
+            },
+        )
+    }
+
+    val perfSnapshot = perfMonitor?.snapshot?.collectAsStateWithLifecycle()?.value
+    LaunchedEffect(glRenderer, perfSnapshot?.effectivePreviewScale) {
+        val scale = perfSnapshot?.effectivePreviewScale ?: 1.0f
+        glRenderer.setPreviewResolutionScale(scale)
+    }
+
+    DisposableEffect(perfMonitor, glRenderer) {
+        val unregister = perfMonitor?.registerTrimListener { level ->
+            glRenderer.trimMemory(level)
+        }
+        onDispose {
+            unregister?.invoke()
         }
     }
 
@@ -247,12 +275,15 @@ fun TimelinePreviewMonitor(
 
     // Sync Primary Video Slot
     LaunchedEffect(
-        primaryVideoAsset?.playbackUri,
+        primaryVideoAsset?.previewUri(preferProxyPlayback),
         primaryVideoLayer?.clip?.clipId,
         primaryVideoLayer?.clip?.speed,
+        primaryVideoLayer?.clip?.speedRampPoints,
+        primaryVideoLayer?.clip?.isReversed,
         primaryVideoLayer?.effectiveVolume,
         isPlaying,
         playheadMs,
+        preferProxyPlayback,
         attachedPrimarySurface,
     ) {
         val result = syncExoPlayerToLayer(
@@ -261,6 +292,7 @@ fun TimelinePreviewMonitor(
             asset = primaryVideoAsset,
             loadedUri = loadedPrimaryVideoUri,
             isPlaying = isPlaying,
+            preferProxyPlayback = preferProxyPlayback,
         )
         loadedPrimaryVideoUri = result.first
         if (result.second > 0f) reportedPrimaryRatio = result.second
@@ -268,12 +300,15 @@ fun TimelinePreviewMonitor(
 
     // Sync Secondary Overlay Video Slot
     LaunchedEffect(
-        secondaryVideoAsset?.playbackUri,
+        secondaryVideoAsset?.previewUri(preferProxyPlayback),
         secondaryVideoLayer?.clip?.clipId,
         secondaryVideoLayer?.clip?.speed,
+        secondaryVideoLayer?.clip?.speedRampPoints,
+        secondaryVideoLayer?.clip?.isReversed,
         secondaryVideoLayer?.effectiveVolume,
         isPlaying,
         playheadMs,
+        preferProxyPlayback,
         attachedSecondarySurface,
     ) {
         val result = syncExoPlayerToLayer(
@@ -282,32 +317,36 @@ fun TimelinePreviewMonitor(
             asset = secondaryVideoAsset,
             loadedUri = loadedSecondaryVideoUri,
             isPlaying = isPlaying,
+            preferProxyPlayback = preferProxyPlayback,
         )
         loadedSecondaryVideoUri = result.first
         if (result.second > 0f) reportedSecondaryRatio = result.second
     }
 
     // Sync Multi-Track Audio Pool (up to 4 simultaneous active audio layers on timeline clock)
-    LaunchedEffect(activeAudioSlots, isPlaying, playheadMs) {
+    LaunchedEffect(activeAudioSlots, isPlaying, playheadMs, preferProxyPlayback) {
         for (slotIdx in audioPlayers.indices) {
             val player = audioPlayers[slotIdx]
             val layer = activeAudioSlots.getOrNull(slotIdx)
             val slotAsset = layer?.let { assetsById[it.clip.assetId] }
             if (layer != null && slotAsset != null && slotAsset.status == MediaStatus.READY) {
-                if (loadedAudioUris[slotIdx] != slotAsset.playbackUri) {
-                    loadedAudioUris[slotIdx] = slotAsset.playbackUri
-                    player.setMediaItem(MediaItem.fromUri(slotAsset.playbackUri))
+                val chosenUri = slotAsset.previewUri(preferProxyPlayback)
+                if (loadedAudioUris[slotIdx] != chosenUri) {
+                    loadedAudioUris[slotIdx] = chosenUri
+                    player.setMediaItem(MediaItem.fromUri(chosenUri))
                     player.prepare()
                 }
-                val speed = layer.clip.speed.coerceIn(0.25f, 4.0f)
+                val speed = SpeedRampEngine.instantaneousSpeedAt(layer.clip, layer.clipRelativeMs)
                 if (abs(player.playbackParameters.speed - speed) > 0.01f) {
                     player.playbackParameters = PlaybackParameters(speed)
                 }
-                val targetSourceMs = (
-                    layer.clip.sourceStartMs + (layer.clipRelativeMs * speed).toLong()
-                    ).coerceAtLeast(0L)
-                player.volume = layer.effectiveVolume.coerceIn(0f, 1f)
-                if (isPlaying) {
+                val targetSourceMs = SpeedRampEngine.clipRelativeToSourceMs(
+                    layer.clip,
+                    layer.clipRelativeMs,
+                    slotAsset.durationMs,
+                )
+                player.volume = if (layer.clip.isReversed) 0f else layer.effectiveVolume.coerceIn(0f, 1f)
+                if (isPlaying && !layer.clip.isReversed) {
                     if (abs(player.currentPosition - targetSourceMs) > 260L) {
                         player.seekTo(targetSourceMs)
                     }
@@ -455,14 +494,26 @@ fun TimelinePreviewMonitor(
                     val layerCountTag = if (resolvedComposition.layers.size > 1) {
                         "${resolvedComposition.layers.size}L • "
                     } else ""
-                    val speedSuffix = if (abs(topVisual.sourceLayer.clip.speed - 1f) > 0.02f) {
-                        " • ${String.format("%.2gx", topVisual.sourceLayer.clip.speed)}"
+                    val instantSpeed = SpeedRampEngine.instantaneousSpeedAt(
+                        topVisual.sourceLayer.clip,
+                        topVisual.sourceLayer.clipRelativeMs,
+                    )
+                    val speedSuffix = if (abs(instantSpeed - 1f) > 0.02f || topVisual.sourceLayer.clip.speedRampPoints.isNotEmpty()) {
+                        " • ${String.format("%.2gx", instantSpeed)}"
                     } else ""
+                    val revSuffix = if (topVisual.sourceLayer.clip.isReversed) " • REV" else ""
                     StudioBadge(
-                        text = "$layerCountTag${topVisual.sourceLayer.track.name}: ${topVisual.asset.displayName}$speedSuffix",
+                        text = "$layerCountTag${topVisual.sourceLayer.track.name}: ${topVisual.asset.displayName}$speedSuffix$revSuffix",
                         containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.88f),
                         contentColor = MaterialTheme.colorScheme.primary,
                     )
+                    if (preferProxyPlayback && topVisual.asset.hasReadyProxy) {
+                        StudioBadge(
+                            text = "PROXY",
+                            containerColor = studio.quickCyan.copy(alpha = 0.22f),
+                            contentColor = studio.quickCyan,
+                        )
+                    }
                 }
                 if (resolvedComposition.hasActiveAdjustmentLayer) {
                     StudioBadge(
@@ -475,6 +526,13 @@ fun TimelinePreviewMonitor(
                     StudioBadge(
                         text = "♪ ${audioAsset.displayName}",
                         containerColor = studio.audioAmberContainer.copy(alpha = 0.9f),
+                        contentColor = studio.audioAmber,
+                    )
+                }
+                if (perfSnapshot != null && perfSnapshot.effectivePreviewScale < 0.99f) {
+                    StudioBadge(
+                        text = "${(perfSnapshot.effectivePreviewScale * 100).toInt()}% GL",
+                        containerColor = studio.audioAmber.copy(alpha = 0.22f),
                         contentColor = studio.audioAmber,
                     )
                 }
@@ -582,6 +640,7 @@ private fun syncExoPlayerToLayer(
     asset: MediaAsset?,
     loadedUri: String?,
     isPlaying: Boolean,
+    preferProxyPlayback: Boolean,
 ): Pair<String?, Float> {
     var nextUri = loadedUri
     var newRatio = -1f
@@ -589,23 +648,26 @@ private fun syncExoPlayerToLayer(
         asset.type == MediaType.VIDEO &&
         asset.status == MediaStatus.READY
     ) {
-        if (nextUri != asset.playbackUri) {
-            nextUri = asset.playbackUri
+        val chosenUri = asset.previewUri(preferProxyPlayback)
+        if (nextUri != chosenUri) {
+            nextUri = chosenUri
             if (asset.width > 0 && asset.height > 0) {
                 newRatio = asset.width.toFloat() / asset.height.toFloat()
             }
-            player.setMediaItem(MediaItem.fromUri(asset.playbackUri))
+            player.setMediaItem(MediaItem.fromUri(chosenUri))
             player.prepare()
         }
-        val speed = layer.clip.speed.coerceIn(0.25f, 4.0f)
+        val speed = SpeedRampEngine.instantaneousSpeedAt(layer.clip, layer.clipRelativeMs)
         if (abs(player.playbackParameters.speed - speed) > 0.01f) {
             player.playbackParameters = PlaybackParameters(speed)
         }
-        val targetSourceMs = (
-            layer.clip.sourceStartMs + (layer.clipRelativeMs * speed).toLong()
-            ).coerceAtLeast(0L)
-        player.volume = layer.effectiveVolume.coerceIn(0f, 1f)
-        if (isPlaying) {
+        val targetSourceMs = SpeedRampEngine.clipRelativeToSourceMs(
+            clip = layer.clip,
+            clipRelativeMs = layer.clipRelativeMs,
+            assetDurationMs = asset.durationMs,
+        )
+        player.volume = if (layer.clip.isReversed) 0f else layer.effectiveVolume.coerceIn(0f, 1f)
+        if (isPlaying && !layer.clip.isReversed) {
             if (abs(player.currentPosition - targetSourceMs) > 260L) {
                 player.seekTo(targetSourceMs)
             }

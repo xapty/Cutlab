@@ -30,6 +30,10 @@ class PcmAudioExtractor(
     private val memoryWaveforms = ConcurrentHashMap<String, WaveformEnvelope>()
     private val waveformDir = File(context.cacheDir, "waveforms").apply { mkdirs() }
 
+    fun trimMemoryCache() {
+        memoryWaveforms.clear()
+    }
+
     suspend fun extractWaveform(
         asset: MediaAsset,
         binCount: Int = 120,

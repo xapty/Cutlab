@@ -147,6 +147,7 @@ class ProjectRepository(
                 id = newAssetId,
                 projectId = newDoc.id,
                 managedFilePath = copiedPath,
+                proxyFilePath = null,
                 statusName = if (copiedPath != null || asset.managedFilePath == null) {
                     asset.statusName
                 } else {
@@ -175,8 +176,10 @@ class ProjectRepository(
     }
 
     suspend fun deleteProject(projectId: String) {
+        val proxyPaths = mediaAssetDao.getAssetsForProject(projectId).mapNotNull { it.proxyFilePath }
         projectDao.deleteProjectById(projectId)
         storageManager.deleteProjectDirectory(projectId)
+        storageManager.deleteFiles(proxyPaths)
     }
 
     suspend fun importMediaToProject(
@@ -242,11 +245,17 @@ class ProjectRepository(
         }
         mediaAssetDao.deleteAssetById(assetId)
         storageManager.deleteFile(entity.managedFilePath)
+        storageManager.deleteFile(entity.proxyFilePath)
+    }
+
+    suspend fun updateAssetProxyPath(assetId: String, proxyFilePath: String?) {
+        mediaAssetDao.updateProxyFilePath(assetId, proxyFilePath)
     }
 
     suspend fun verifyMediaIntegrity() {
         val paths = mediaAssetDao.getAllManagedFilePaths().toSet()
-        storageManager.pruneOrphanedFiles(paths)
+        val proxyPaths = mediaAssetDao.getAllProxyFilePaths().toSet()
+        storageManager.pruneOrphanedFiles(paths, proxyPaths)
     }
 
     suspend fun getManagedStorageFootprintBytes(): Long =
@@ -254,7 +263,8 @@ class ProjectRepository(
 
     suspend fun pruneOrphanedMedia(): Int {
         val paths = mediaAssetDao.getAllManagedFilePaths().toSet()
-        return storageManager.pruneOrphanedFiles(paths)
+        val proxyPaths = mediaAssetDao.getAllProxyFilePaths().toSet()
+        return storageManager.pruneOrphanedFiles(paths, proxyPaths)
     }
 
     suspend fun addTrack(projectId: String, type: TrackType): TimelineTrack? {
@@ -359,6 +369,7 @@ class ProjectRepository(
         } else {
             runCatching { MediaStatus.valueOf(statusName) }.getOrDefault(MediaStatus.READY)
         }
+        val healthyProxy = proxyFilePath?.takeIf { storageManager.fileExists(it) }
         return MediaAsset(
             id = id,
             projectId = projectId,
@@ -375,6 +386,7 @@ class ProjectRepository(
             fileSizeBytes = fileSizeBytes,
             status = resolvedStatus,
             importedAt = importedAt,
+            proxyFilePath = healthyProxy,
         )
     }
 
@@ -394,5 +406,6 @@ class ProjectRepository(
         fileSizeBytes = fileSizeBytes,
         statusName = status.name,
         importedAt = importedAt,
+        proxyFilePath = proxyFilePath,
     )
 }
