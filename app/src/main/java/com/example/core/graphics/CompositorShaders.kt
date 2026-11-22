@@ -249,6 +249,7 @@ object CompositorShaders {
     """
 
     const val LAYER_FRAGMENT_SHADER_2D = """
+        precision mediump float;
         uniform sampler2D uTexture;
         vec4 sampleLayerTexture(vec2 uv) {
             return texture2D(uTexture, uv);
@@ -257,6 +258,7 @@ object CompositorShaders {
 
     const val LAYER_FRAGMENT_SHADER_OES = """
         #extension GL_OES_EGL_image_external : require
+        precision mediump float;
         uniform samplerExternalOES uTexture;
         vec4 sampleLayerTexture(vec2 uv) {
             return texture2D(uTexture, uv);
